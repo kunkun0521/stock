@@ -1,0 +1,39 @@
+<?xml version="1.0" encoding="UTF-8" ?>
+<!DOCTYPE mapper PUBLIC "-//mybatis.org//DTD Mapper 3.0//EN" "https://mybatis.org/dtd/mybatis-3-mapper.dtd">
+<mapper namespace="com.li.stock.mapper.ScoreRankingMapper">
+    <sql id="where">
+        WHERE s.`adjustflag` = #{adjustFlag}
+        <choose>
+            <when test="tradeDate != null">AND s.`trade_date` = #{tradeDate}</when>
+            <otherwise>AND s.`trade_date` = (SELECT MAX(x.`trade_date`) FROM `stock_score_daily` x WHERE x.`adjustflag` = #{adjustFlag})</otherwise>
+        </choose>
+        <if test="keyword != null and keyword != ''">AND (s.`code` LIKE CONCAT('%',#{keyword},'%') OR i.`name` LIKE CONCAT('%',#{keyword},'%'))</if>
+        <if test="minScore != null">AND s.`total_score` &gt;= #{minScore}</if>
+        <if test="market != null">AND i.`market` = #{market}</if>
+        <if test="industry != null and industry != ''">AND i.`industry` = #{industry}</if>
+    </sql>
+    <select id="count" resultType="long">
+        SELECT COUNT(*) FROM `stock_score_daily` s
+        LEFT JOIN `stock_info` i ON i.`code` = s.`code` AND i.`exchange` = s.`market`
+        <include refid="where"/>
+    </select>
+    <select id="page" resultType="com.li.stock.domain.vo.ScoreRankingVO">
+        SELECT ROW_NUMBER() OVER (ORDER BY s.`total_score` DESC, s.`code` ASC) AS `rank`,
+               s.`code`, i.`name`, i.`market`, i.`exchange`, i.`board`, i.`industry`,
+               s.`trade_date` AS `tradeDate`, s.`adjustflag` AS `adjustFlag`, s.`total_score` AS `totalScore`,
+               s.`value_score` AS `valueScore`, s.`momentum_score` AS `momentumScore`, s.`trend_score` AS `trendScore`,
+               s.`risk_score` AS `riskScore`, s.`liquidity_score` AS `liquidityScore`, s.`close`,
+               s.`pe_ttm` AS `peTtm`, s.`pb_mrq` AS `pbMrq`, s.`ps_ttm` AS `psTtm`, s.`pcf_ncf_ttm` AS `pcfNcfTtm`,
+               s.`ret_21` AS `ret21`, s.`ret_63` AS `ret63`, s.`ret_126` AS `ret126`, s.`ret_252` AS `ret252`,
+               s.`vol_60` AS `vol60`, s.`drawdown_252` AS `drawdown252`, s.`amount_ratio_20` AS `amountRatio20`,
+               s.`turnover_20` AS `turnover20`
+        FROM `stock_score_daily` s
+        LEFT JOIN `stock_info` i ON i.`code` = s.`code` AND i.`exchange` = s.`market`
+        <include refid="where"/>
+        ORDER BY s.`total_score` DESC, s.`code` ASC LIMIT #{size} OFFSET #{offset}
+    </select>
+    <select id="availableDates" resultType="java.time.LocalDate">
+        SELECT DISTINCT `trade_date` FROM `stock_score_daily`
+        WHERE `adjustflag` = #{adjustFlag} ORDER BY `trade_date` DESC LIMIT #{limit}
+    </select>
+</mapper>

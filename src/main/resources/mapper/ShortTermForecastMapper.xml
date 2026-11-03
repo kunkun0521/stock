@@ -1,0 +1,62 @@
+<?xml version="1.0" encoding="UTF-8" ?>
+<!DOCTYPE mapper PUBLIC "-//mybatis.org//DTD Mapper 3.0//EN" "https://mybatis.org/dtd/mybatis-3-mapper.dtd">
+<mapper namespace="com.li.stock.mapper.ShortTermForecastMapper">
+    <sql id="where">
+        WHERE f20.`adjustflag` = #{adjustFlag} AND f20.`horizon_days` = 20
+        <choose>
+            <when test="tradeDate != null">AND f20.`trade_date` = #{tradeDate}</when>
+            <otherwise>AND f20.`trade_date` = (SELECT MAX(x.`trade_date`) FROM `stock_forecast_daily` x WHERE x.`adjustflag` = #{adjustFlag} AND x.`horizon_days` = 20)</otherwise>
+        </choose>
+        <if test="keyword != null and keyword != ''">AND (f20.`code` LIKE CONCAT('%',#{keyword},'%') OR i.`name` LIKE CONCAT('%',#{keyword},'%'))</if>
+        <if test="minProbability != null">AND f20.`target15_probability` &gt;= #{minProbability}</if>
+    </sql>
+    <select id="count" resultType="long">
+        SELECT COUNT(*) FROM `stock_forecast_daily` f20
+        LEFT JOIN `stock_info` i ON i.`code` = f20.`code` AND i.`exchange` = f20.`market`
+        <include refid="where"/>
+    </select>
+    <select id="page" resultType="com.li.stock.domain.vo.ShortTermForecastVO">
+        SELECT ROW_NUMBER() OVER (ORDER BY f20.`forecast_score` DESC, f20.`target15_probability` DESC, f20.`code`) AS `rank`,
+               f20.`code`, i.`name`, i.`market`, i.`exchange`, i.`board`, i.`industry`,
+               f20.`trade_date` AS `tradeDate`, f20.`adjustflag` AS `adjustFlag`, f20.`forecast_score` AS `score20`,
+               f5.`expected_return` AS `expected5`, f10.`expected_return` AS `expected10`,
+               f15.`expected_return` AS `expected15`, f20.`expected_return` AS `expected20`,
+               f5.`target15_probability` AS `probability5`, f10.`target15_probability` AS `probability10`,
+               f15.`target15_probability` AS `probability15`, f20.`target15_probability` AS `probability20`,
+               f5.`confidence` AS `confidence5`, f10.`confidence` AS `confidence10`,
+               f15.`confidence` AS `confidence15`, f20.`confidence` AS `confidence20`,
+               f20.`analog_count` AS `analogCount20`
+        FROM `stock_forecast_daily` f20
+        LEFT JOIN `stock_forecast_daily` f5 ON f5.`code`=f20.`code` AND f5.`market`=f20.`market`
+             AND f5.`trade_date`=f20.`trade_date` AND f5.`adjustflag`=f20.`adjustflag` AND f5.`horizon_days`=5
+        LEFT JOIN `stock_forecast_daily` f10 ON f10.`code`=f20.`code` AND f10.`market`=f20.`market`
+             AND f10.`trade_date`=f20.`trade_date` AND f10.`adjustflag`=f20.`adjustflag` AND f10.`horizon_days`=10
+        LEFT JOIN `stock_forecast_daily` f15 ON f15.`code`=f20.`code` AND f15.`market`=f20.`market`
+             AND f15.`trade_date`=f20.`trade_date` AND f15.`adjustflag`=f20.`adjustflag` AND f15.`horizon_days`=15
+        LEFT JOIN `stock_info` i ON i.`code`=f20.`code` AND i.`exchange`=f20.`market`
+        <include refid="where"/>
+        ORDER BY f20.`forecast_score` DESC, f20.`target15_probability` DESC, f20.`code`
+        LIMIT #{size} OFFSET #{offset}
+    </select>
+    <select id="availableDates" resultType="java.time.LocalDate">
+        SELECT DISTINCT `trade_date` FROM `stock_forecast_daily`
+        WHERE `adjustflag`=#{adjustFlag} AND `horizon_days`=20
+        ORDER BY `trade_date` DESC LIMIT #{limit}
+    </select>
+    <select id="latestDate" resultType="java.time.LocalDate">
+        SELECT MAX(`trade_date`) FROM `stock_daily_all` WHERE `adjustflag`=#{adjustFlag}
+    </select>
+    <insert id="save">
+        INSERT INTO `stock_forecast_daily`
+        (`code`,`market`,`trade_date`,`adjustflag`,`horizon_days`,`expected_return`,
+         `target15_probability`,`confidence`,`forecast_score`,`analog_count`)
+        VALUES
+        <foreach collection="results" item="item" separator=",">
+            (#{item.code},#{item.market},#{item.tradeDate},#{item.adjustFlag},#{item.horizonDays},#{item.expectedReturn},
+             #{item.target15Probability},#{item.confidence},#{item.forecastScore},#{item.analogCount})
+        </foreach>
+        ON DUPLICATE KEY UPDATE
+        `expected_return`=VALUES(`expected_return`),`target15_probability`=VALUES(`target15_probability`),
+        `confidence`=VALUES(`confidence`),`forecast_score`=VALUES(`forecast_score`),`analog_count`=VALUES(`analog_count`)
+    </insert>
+</mapper>

@@ -1,0 +1,39 @@
+<?xml version="1.0" encoding="UTF-8" ?>
+<!DOCTYPE mapper PUBLIC "-//mybatis.org//DTD Mapper 3.0//EN" "https://mybatis.org/dtd/mybatis-3-mapper.dtd">
+<mapper namespace="com.li.stock.mapper.CrawlTaskMapper">
+    <insert id="create" useGeneratedKeys="true" keyProperty="id" keyColumn="id">
+        INSERT INTO `crawl_log`
+        (`task_name`,`total_count`,`success_count`,`fail_count`,`start_time`,`status`,`remark`)
+        VALUES (#{taskName},#{totalCount},#{successCount},#{failCount},#{startTime},#{status},#{remark})
+    </insert>
+
+    <select id="find" resultType="com.li.stock.domain.vo.CrawlTaskVO">
+        SELECT `id`,`task_name` AS `taskName`,`total_count` AS `totalCount`,
+               `success_count` AS `successCount`,`fail_count` AS `failCount`,
+               `start_time` AS `startTime`,`end_time` AS `endTime`,
+               `status`,`remark`
+        FROM `crawl_log` WHERE `id`=#{id}
+    </select>
+
+    <select id="recent" resultType="com.li.stock.domain.vo.CrawlTaskVO">
+        SELECT `id`,`task_name` AS `taskName`,`total_count` AS `totalCount`,
+               `success_count` AS `successCount`,`fail_count` AS `failCount`,
+               `start_time` AS `startTime`,`end_time` AS `endTime`,
+               `status`,`remark`
+        FROM `crawl_log` ORDER BY `id` DESC LIMIT #{limit}
+    </select>
+
+    <update id="updateProgress">
+        UPDATE `crawl_log`
+        SET `total_count`=#{totalCount},`success_count`=#{successCount},
+            `fail_count`=#{failCount},`remark`=#{remark}
+        WHERE `id`=#{id}
+    </update>
+
+    <update id="finish">
+        UPDATE `crawl_log`
+        SET `end_time`=CURRENT_TIMESTAMP,`status`=#{status},
+            `success_count`=#{successCount},`fail_count`=#{failCount},`remark`=#{remark}
+        WHERE `id`=#{id}
+    </update>
+</mapper>

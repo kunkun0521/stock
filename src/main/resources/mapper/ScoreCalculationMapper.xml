@@ -1,0 +1,45 @@
+<?xml version="1.0" encoding="UTF-8" ?>
+<!DOCTYPE mapper PUBLIC "-//mybatis.org//DTD Mapper 3.0//EN" "https://mybatis.org/dtd/mybatis-3-mapper.dtd">
+<mapper namespace="com.li.stock.mapper.ScoreCalculationMapper">
+    <select id="latestDate" resultType="java.time.LocalDate">
+        SELECT MAX(`trade_date`) FROM `stock_daily_all` WHERE `adjustflag` = #{adjustFlag}
+    </select>
+    <select id="loadBars" resultType="com.li.stock.domain.model.ScoreBar">
+        SELECT `code`, `market`, `trade_date` AS `tradeDate`, `close`, `amount`, `turnover`,
+               `tradestatus` AS `tradeStatus`, `is_st` AS `isSt`, `pe_ttm` AS `peTtm`,
+               `pb_mrq` AS `pbMrq`, `ps_ttm` AS `psTtm`, `pcf_ncf_ttm` AS `pcfNcfTtm`
+        FROM `stock_daily_all`
+        WHERE `adjustflag` = #{adjustFlag}
+          AND `trade_date` BETWEEN DATE_SUB(#{asOfDate}, INTERVAL #{calendarDays} DAY) AND #{asOfDate}
+        ORDER BY `code`, `market`, `trade_date`
+    </select>
+    <select id="loadBarsBetween" resultType="com.li.stock.domain.model.ScoreBar">
+        SELECT `code`, `market`, `trade_date` AS `tradeDate`, `close`, `amount`, `turnover`,
+               `tradestatus` AS `tradeStatus`, `is_st` AS `isSt`, `pe_ttm` AS `peTtm`,
+               `pb_mrq` AS `pbMrq`, `ps_ttm` AS `psTtm`, `pcf_ncf_ttm` AS `pcfNcfTtm`
+        FROM `stock_daily_all`
+        WHERE `adjustflag` = #{adjustFlag}
+          AND `trade_date` BETWEEN #{fromDate} AND #{toDate}
+        ORDER BY `code`, `market`, `trade_date`
+    </select>
+    <insert id="save">
+        INSERT INTO `stock_score_daily`
+        (`code`,`market`,`trade_date`,`adjustflag`,`total_score`,`value_score`,`momentum_score`,`trend_score`,
+         `risk_score`,`liquidity_score`,`close`,`pe_ttm`,`pb_mrq`,`ps_ttm`,`pcf_ncf_ttm`,`ret_21`,`ret_63`,
+         `ret_126`,`ret_252`,`vol_60`,`drawdown_252`,`amount_ratio_20`,`turnover_20`)
+        VALUES
+        <foreach collection="results" item="item" separator=",">
+            (#{item.code},#{item.market},#{item.tradeDate},#{item.adjustFlag},#{item.totalScore},#{item.valueScore},
+             #{item.momentumScore},#{item.trendScore},#{item.riskScore},#{item.liquidityScore},#{item.close},
+             #{item.peTtm},#{item.pbMrq},#{item.psTtm},#{item.pcfNcfTtm},#{item.ret21},#{item.ret63},#{item.ret126},
+             #{item.ret252},#{item.vol60},#{item.drawdown252},#{item.amountRatio20},#{item.turnover20})
+        </foreach>
+        ON DUPLICATE KEY UPDATE
+        `total_score`=VALUES(`total_score`),`value_score`=VALUES(`value_score`),`momentum_score`=VALUES(`momentum_score`),
+        `trend_score`=VALUES(`trend_score`),`risk_score`=VALUES(`risk_score`),`liquidity_score`=VALUES(`liquidity_score`),
+        `close`=VALUES(`close`),`pe_ttm`=VALUES(`pe_ttm`),`pb_mrq`=VALUES(`pb_mrq`),`ps_ttm`=VALUES(`ps_ttm`),
+        `pcf_ncf_ttm`=VALUES(`pcf_ncf_ttm`),`ret_21`=VALUES(`ret_21`),`ret_63`=VALUES(`ret_63`),`ret_126`=VALUES(`ret_126`),
+        `ret_252`=VALUES(`ret_252`),`vol_60`=VALUES(`vol_60`),`drawdown_252`=VALUES(`drawdown_252`),
+        `amount_ratio_20`=VALUES(`amount_ratio_20`),`turnover_20`=VALUES(`turnover_20`)
+    </insert>
+</mapper>

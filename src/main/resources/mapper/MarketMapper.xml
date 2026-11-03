@@ -1,0 +1,97 @@
+<?xml version="1.0" encoding="UTF-8" ?>
+<!DOCTYPE mapper PUBLIC "-//mybatis.org//DTD Mapper 3.0//EN" "https://mybatis.org/dtd/mybatis-3-mapper.dtd">
+<mapper namespace="com.li.stock.mapper.MarketMapper">
+    <sql id="dedupDay">
+        (SELECT `code`, MAX(`pct_chg`) AS `pct_chg`, MAX(`amount`) AS `amount`, MAX(`volume`) AS `volume`,
+                MAX(`turnover`) AS `turnover`, MAX(`amplitude`) AS `amplitude`,
+                MAX(`tradestatus`) AS `tradestatus`, MAX(`is_st`) AS `is_st`
+         FROM `stock_daily_all` WHERE `trade_date` = #{tradeDate} GROUP BY `code`) d
+    </sql>
+    <sql id="oneFlag">
+        AND COALESCE(d.`adjustflag`, -1) = (
+            SELECT COALESCE(MIN(d2.`adjustflag`), -1) FROM `stock_daily_all` d2
+            WHERE d2.`code` = d.`code` AND d2.`trade_date` = d.`trade_date`)
+    </sql>
+
+    <select id="latestTradeDate" resultType="java.time.LocalDate">SELECT MAX(`trade_date`) FROM `stock_daily_all`</select>
+    <select id="recentTradeDates" resultType="java.time.LocalDate">
+        SELECT DISTINCT `trade_date` FROM `stock_daily_all` ORDER BY `trade_date` DESC LIMIT #{limit}
+    </select>
+
+    <select id="overview" resultType="com.li.stock.domain.vo.MarketOverviewVO">
+        SELECT #{tradeDate} AS `tradeDate`, COUNT(*) AS `totalStocks`,
+               COALESCE(SUM(CASE WHEN d.`pct_chg` &gt; 0 THEN 1 ELSE 0 END),0) AS `upCount`,
+               COALESCE(SUM(CASE WHEN d.`pct_chg` &lt; 0 THEN 1 ELSE 0 END),0) AS `downCount`,
+               COALESCE(SUM(CASE WHEN d.`pct_chg` = 0 THEN 1 ELSE 0 END),0) AS `flatCount`,
+               COALESCE(SUM(CASE WHEN d.`pct_chg` &gt;= 9.8 THEN 1 ELSE 0 END),0) AS `limitUpCount`,
+               COALESCE(SUM(CASE WHEN d.`pct_chg` &lt;= -9.8 THEN 1 ELSE 0 END),0) AS `limitDownCount`,
+               COALESCE(SUM(CASE WHEN d.`tradestatus` = 0 THEN 1 ELSE 0 END),0) AS `suspendedCount`,
+               COALESCE(SUM(CASE WHEN d.`is_st` = 1 THEN 1 ELSE 0 END),0) AS `stCount`,
+               COALESCE(ROUND(SUM(CASE WHEN d.`pct_chg` &gt; 0 THEN 1 ELSE 0 END) / NULLIF(COUNT(*),0) * 100, 2),0) AS `upRatio`,
+               COALESCE(SUM(d.`volume`),0) AS `totalVolume`, COALESCE(SUM(d.`amount`),0) AS `totalAmount`,
+               COALESCE(AVG(d.`pct_chg`),0) AS `avgPctChg`, COALESCE(AVG(d.`turnover`),0) AS `avgTurnover`
+        FROM <include refid="dedupDay"/>
+    </select>
+
+    <select id="distribution" resultType="com.li.stock.repository.MarketRepository$BucketCount">
+        SELECT FLOOR(d.`pct_chg`) AS `bucket`, COUNT(*) AS `count`
+        FROM <include refid="dedupDay"/> WHERE d.`pct_chg` IS NOT NULL GROUP BY FLOOR(d.`pct_chg`)
+    </select>
+
+    <select id="ranking" resultType="com.li.stock.domain.vo.QuoteVO">
+        SELECT i.`code` AS `code`, i.`name` AS `name`, i.`board` AS `board`, i.`industry` AS `industry`,
+               d.`trade_date` AS `tradeDate`, d.`open` AS `open`, d.`high` AS `high`, d.`low` AS `low`,
+               d.`close` AS `close`, d.`preclose` AS `preclose`, d.`pct_chg` AS `pctChg`, d.`chg_amt` AS `chgAmt`,
+               d.`volume` AS `volume`, d.`amount` AS `amount`, d.`turnover` AS `turnover`, d.`amplitude` AS `amplitude`,
+               d.`pe_ttm` AS `peTtm`, d.`pb_mrq` AS `pbMrq`, d.`is_st` AS `isSt`, d.`tradestatus` AS `tradeStatus`
+        FROM `stock_daily_all` d LEFT JOIN `stock_info` i ON i.`code` = d.`code`
+        WHERE d.`trade_date` = #{tradeDate} AND d.`pct_chg` IS NOT NULL
+        <include refid="oneFlag"/>
+        <if test="board != null and board != ''">AND i.`board` = #{board}</if>
+        <if test="includeSt == false">AND (d.`is_st` IS NULL OR d.`is_st` = 0)</if>
+        ORDER BY
+        <choose>
+            <when test="type == 'losers'">d.`pct_chg` ASC</when>
+            <when test="type == 'amount'">d.`amount` DESC</when>
+            <when test="type == 'volume'">d.`volume` DESC</when>
+            <when test="type == 'turnover'">d.`turnover` DESC</when>
+            <when test="type == 'amplitude'">d.`amplitude` DESC</when>
+            <when test="type == 'pe'">d.`pe_ttm` ASC</when>
+            <when test="type == 'pb'">d.`pb_mrq` ASC</when>
+            <otherwise>d.`pct_chg` DESC</otherwise>
+        </choose>
+        LIMIT #{limit}
+    </select>
+
+    <select id="sectorPerformance" resultType="com.li.stock.domain.vo.SectorPerfVO">
+        SELECT
+        <choose><when test="dimension != null and dimension.toLowerCase() == 'industry'">i.`industry`</when><otherwise>i.`board`</otherwise></choose> AS `name`,
+               COUNT(*) AS `stockCount`,
+               COALESCE(SUM(CASE WHEN d.`pct_chg` &gt; 0 THEN 1 ELSE 0 END),0) AS `upCount`,
+               COALESCE(SUM(CASE WHEN d.`pct_chg` &lt; 0 THEN 1 ELSE 0 END),0) AS `downCount`,
+               COALESCE(ROUND(SUM(CASE WHEN d.`pct_chg` &gt; 0 THEN 1 ELSE 0 END) / NULLIF(COUNT(*),0) * 100,2),0) AS `upRatio`,
+               COALESCE(AVG(d.`pct_chg`),0) AS `avgPctChg`, COALESCE(SUM(d.`amount`),0) AS `totalAmount`,
+               COALESCE(AVG(d.`turnover`),0) AS `avgTurnover`
+        FROM <include refid="dedupDay"/> JOIN `stock_info` i ON i.`code` = d.`code`
+        WHERE
+        <choose><when test="dimension != null and dimension.toLowerCase() == 'industry'">i.`industry`</when><otherwise>i.`board`</otherwise></choose>
+        IS NOT NULL AND
+        <choose><when test="dimension != null and dimension.toLowerCase() == 'industry'">i.`industry`</when><otherwise>i.`board`</otherwise></choose>
+        &lt;&gt; ''
+        GROUP BY
+        <choose><when test="dimension != null and dimension.toLowerCase() == 'industry'">i.`industry`</when><otherwise>i.`board`</otherwise></choose>
+        ORDER BY `avgPctChg` DESC LIMIT #{limit}
+    </select>
+
+    <select id="breadth" resultType="com.li.stock.domain.vo.BreadthPointVO">
+        SELECT `trade_date` AS `tradeDate`, COUNT(*) AS `stockCount`,
+               COALESCE(SUM(CASE WHEN `pct_chg` &gt; 0 THEN 1 ELSE 0 END),0) AS `upCount`,
+               COALESCE(SUM(CASE WHEN `pct_chg` &lt; 0 THEN 1 ELSE 0 END),0) AS `downCount`,
+               COALESCE(SUM(`amount`),0) AS `totalAmount`, COALESCE(AVG(`pct_chg`),0) AS `avgPctChg`
+        FROM (
+            SELECT `trade_date`, `code`, MAX(`pct_chg`) AS `pct_chg`, MAX(`amount`) AS `amount`
+            FROM `stock_daily_all` WHERE `trade_date` BETWEEN #{from} AND #{to}
+            GROUP BY `trade_date`, `code`
+        ) t GROUP BY `trade_date` ORDER BY `trade_date` ASC
+    </select>
+</mapper>

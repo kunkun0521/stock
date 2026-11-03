@@ -1,0 +1,67 @@
+<?xml version="1.0" encoding="UTF-8" ?>
+<!DOCTYPE mapper PUBLIC "-//mybatis.org//DTD Mapper 3.0//EN" "https://mybatis.org/dtd/mybatis-3-mapper.dtd">
+<mapper namespace="com.li.stock.mapper.StockDailyMapper">
+    <sql id="columns">
+        `code`, `market`, `trade_date`, `open`, `close`, `high`, `low`, `preclose`, `volume`, `amount`, `amplitude`, `pct_chg`, `chg_amt`, `turnover`, `adjustflag`, `tradestatus`, `is_st`, `pe_ttm`, `pb_mrq`, `ps_ttm`, `pcf_ncf_ttm`, `data_source`
+    </sql>
+    <sql id="where">
+        WHERE `code` = #{code}
+        <if test="from != null">AND `trade_date` &gt;= #{from}</if>
+        <if test="to != null">AND `trade_date` &lt;= #{to}</if>
+        <if test="adjustFlag != null">AND `adjustflag` = #{adjustFlag}</if>
+    </sql>
+    <select id="count" resultType="long">SELECT COUNT(*) FROM `${tableName}` <include refid="where"/></select>
+    <select id="page" resultType="com.li.stock.domain.vo.StockDailyVO">SELECT <include refid="columns"/> FROM `${tableName}` <include refid="where"/> ORDER BY `trade_date` DESC LIMIT #{size} OFFSET #{offset}</select>
+    <select id="recentDesc" resultType="com.li.stock.domain.vo.StockDailyVO">SELECT <include refid="columns"/> FROM `${tableName}` <include refid="where"/> ORDER BY `trade_date` DESC LIMIT #{limit}</select>
+    <select id="listAsc" resultType="com.li.stock.domain.vo.StockDailyVO">SELECT <include refid="columns"/> FROM `${tableName}` <include refid="where"/> ORDER BY `trade_date` ASC</select>
+    <select id="latest" resultType="com.li.stock.domain.vo.StockDailyVO">
+        SELECT <include refid="columns"/> FROM `${tableName}`
+        WHERE `code` = #{code}
+        <if test="adjustFlag != null">AND `adjustflag` = #{adjustFlag}</if>
+        ORDER BY `trade_date` DESC LIMIT 1
+    </select>
+    <select id="latestBefore" resultType="com.li.stock.domain.vo.StockDailyVO">
+        SELECT <include refid="columns"/> FROM `${tableName}` WHERE `code` = #{code} AND `trade_date` &lt;= #{date}
+        <if test="adjustFlag != null">AND `adjustflag` = #{adjustFlag}</if> ORDER BY `trade_date` DESC LIMIT 1
+    </select>
+    <select id="dataRange" resultType="com.li.stock.domain.model.DataRangeStat">
+        SELECT MIN(`trade_date`) AS `firstDate`, MAX(`trade_date`) AS `lastDate`, COUNT(*) AS `rowCount`, COUNT(DISTINCT `trade_date`) AS `tradingDays`, GROUP_CONCAT(DISTINCT `adjustflag` ORDER BY `adjustflag`) AS `adjustFlags`, GROUP_CONCAT(DISTINCT `data_source` ORDER BY `data_source`) AS `dataSources`
+        FROM `${tableName}` WHERE `code` = #{code}
+    </select>
+    <select id="preferredAdjustFlag" resultType="int">SELECT `adjustflag` FROM `${tableName}` WHERE `code` = #{code} AND `adjustflag` IS NOT NULL GROUP BY `adjustflag` ORDER BY COUNT(*) DESC, `adjustflag` LIMIT 1</select>
+    <select id="crawlerDateRanges" resultType="com.li.stock.domain.vo.CrawlerDateRangeVO">
+        SELECT `code`, `adjustflag` AS `adjustFlag`, MIN(`trade_date`) AS `firstDate`,
+               MAX(`trade_date`) AS `latestDate`
+        FROM `stock_daily_all`
+        WHERE `adjustflag` IN
+          <foreach collection="adjustFlags" item="flag" open="(" separator="," close=")">
+              #{flag}
+          </foreach>
+          AND `code` IN
+          <foreach collection="codes" item="code" open="(" separator="," close=")">
+              #{code}
+          </foreach>
+        GROUP BY `code`, `adjustflag`
+    </select>
+    <insert id="saveCrawlerBatch">
+        <!-- tableName 只允许由 StockDailyRepository 的白名单路由传入。 -->
+        INSERT INTO `${tableName}`
+        (`code`,`market`,`trade_date`,`open`,`close`,`high`,`low`,`preclose`,`volume`,`amount`,
+         `amplitude`,`pct_chg`,`chg_amt`,`turnover`,`adjustflag`,`tradestatus`,`is_st`,
+         `pe_ttm`,`pb_mrq`,`ps_ttm`,`pcf_ncf_ttm`,`data_source`)
+        VALUES
+        <foreach collection="list" item="item" separator=",">
+            (#{item.code},#{item.market},#{item.tradeDate},#{item.open},#{item.close},#{item.high},#{item.low},
+             #{item.preclose},#{item.volume},#{item.amount},#{item.amplitude},#{item.pctChg},#{item.chgAmt},
+             #{item.turnover},#{item.adjustFlag},#{item.tradeStatus},#{item.isSt},#{item.peTtm},#{item.pbMrq},
+             #{item.psTtm},#{item.pcfNcfTtm},#{item.dataSource})
+        </foreach>
+        ON DUPLICATE KEY UPDATE
+        `open`=VALUES(`open`),`close`=VALUES(`close`),`high`=VALUES(`high`),`low`=VALUES(`low`),
+        `preclose`=VALUES(`preclose`),`volume`=VALUES(`volume`),`amount`=VALUES(`amount`),
+        `amplitude`=VALUES(`amplitude`),`pct_chg`=VALUES(`pct_chg`),`chg_amt`=VALUES(`chg_amt`),
+        `turnover`=VALUES(`turnover`),`tradestatus`=VALUES(`tradestatus`),`is_st`=VALUES(`is_st`),
+        `pe_ttm`=VALUES(`pe_ttm`),`pb_mrq`=VALUES(`pb_mrq`),`ps_ttm`=VALUES(`ps_ttm`),
+        `pcf_ncf_ttm`=VALUES(`pcf_ncf_ttm`),`data_source`=VALUES(`data_source`)
+    </insert>
+</mapper>

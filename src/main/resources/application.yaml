@@ -1,0 +1,39 @@
+server:
+  port: 8080
+  compression:
+    enabled: true
+    mime-types: application/json,text/html
+
+spring:
+  application:
+    name: stock
+  datasource:
+    url: jdbc:mysql://localhost:3306/stock_eastmoney?useUnicode=true&characterEncoding=utf-8&serverTimezone=Asia/Shanghai&useSSL=false&allowPublicKeyRetrieval=true
+    username: root
+    password: 123456
+    driver-class-name: com.mysql.cj.jdbc.Driver
+    hikari:
+      pool-name: stock-pool
+      minimum-idle: 2
+      maximum-pool-size: 10
+      connection-timeout: 5000
+      idle-timeout: 600000
+      max-lifetime: 1800000
+  jackson:
+    time-zone: Asia/Shanghai
+    default-property-inclusion: non_null
+  sql:
+    init:
+      mode: always
+      schema-locations: classpath:score_schema.sql
+
+logging:
+  level:
+    com.li.stock: INFO
+
+mybatis:
+  mapper-locations: classpath:/mapper/*.xml
+  type-aliases-package: com.li.stock.domain.model,com.li.stock.domain.vo,com.li.stock.domain.query
+  configuration:
+    map-underscore-to-camel-case: true
+    cache-enabled: false

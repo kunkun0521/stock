@@ -1,0 +1,75 @@
+<?xml version="1.0" encoding="UTF-8" ?>
+<!DOCTYPE mapper PUBLIC "-//mybatis.org//DTD Mapper 3.0//EN" "https://mybatis.org/dtd/mybatis-3-mapper.dtd">
+<mapper namespace="com.li.stock.mapper.StockInfoMapper">
+    <sql id="columns">
+        `code`, `name`, `market`, `secid`, `board`, `exchange`, `ipo_date`, `out_date`,
+        `stock_type`, `listing_status`, `industry`, `status`, `created_at`, `updated_at`
+    </sql>
+    <sql id="where">
+        <where>
+            <if test="query != null and query.keyword != null and query.keyword != ''">
+                AND (`code` LIKE CONCAT('%', #{query.keyword}, '%') OR `name` LIKE CONCAT('%', #{query.keyword}, '%') OR `secid` LIKE CONCAT('%', #{query.keyword}, '%'))
+            </if>
+            <if test="query != null and query.market != null">AND `market` = #{query.market}</if>
+            <if test="query != null and query.exchange != null and query.exchange != ''">AND UPPER(`exchange`) = UPPER(#{query.exchange})</if>
+            <if test="query != null and query.board != null and query.board != ''">AND `board` = #{query.board}</if>
+            <if test="query != null and query.industry != null and query.industry != ''">AND `industry` = #{query.industry}</if>
+            <if test="query != null and query.status != null">AND `status` = #{query.status}</if>
+            <if test="query != null and query.listedOnly == true">AND `out_date` IS NULL</if>
+            <if test="query != null and query.ipoFrom != null">AND `ipo_date` &gt;= #{query.ipoFrom}</if>
+            <if test="query != null and query.ipoTo != null">AND `ipo_date` &lt;= #{query.ipoTo}</if>
+        </where>
+    </sql>
+    <select id="count" resultType="long">SELECT COUNT(*) FROM `stock_info` <include refid="where"/></select>
+    <select id="page" resultType="com.li.stock.domain.vo.StockInfoVO">
+        SELECT <include refid="columns"/> FROM `stock_info` <include refid="where"/>
+        ORDER BY
+        <choose>
+            <when test="query != null and query.sort == 'name'">`name`</when>
+            <when test="query != null and query.sort == 'ipoDate'">`ipo_date`</when>
+            <when test="query != null and query.sort == 'market'">`market`</when>
+            <when test="query != null and query.sort == 'industry'">`industry`</when>
+            <when test="query != null and query.sort == 'updatedAt'">`updated_at`</when>
+            <otherwise>`code`</otherwise>
+        </choose>
+        <choose>
+            <when test="query != null and query.order != null and query.order.toLowerCase() == 'desc'">DESC</when>
+            <otherwise>ASC</otherwise>
+        </choose>
+        LIMIT #{size} OFFSET #{offset}
+    </select>
+    <select id="findByCode" resultType="com.li.stock.domain.vo.StockInfoVO">
+        SELECT <include refid="columns"/> FROM `stock_info` WHERE `code` = #{code}
+    </select>
+    <select id="suggest" resultType="com.li.stock.domain.vo.StockBriefVO">
+        SELECT `code`, `name`, `market`, `exchange`, `board`, `industry` FROM `stock_info`
+        WHERE `code` LIKE CONCAT('%', #{keyword}, '%') OR `name` LIKE CONCAT('%', #{keyword}, '%') OR `secid` LIKE CONCAT('%', #{keyword}, '%')
+        ORDER BY CASE WHEN `code` LIKE CONCAT(#{keyword}, '%') THEN 0 ELSE 1 END, `code` LIMIT #{limit}
+    </select>
+    <select id="distinctBoards" resultType="string">SELECT DISTINCT `board` FROM `stock_info` WHERE `board` IS NOT NULL AND `board` &lt;&gt; '' ORDER BY `board`</select>
+    <select id="distinctIndustries" resultType="string">SELECT DISTINCT `industry` FROM `stock_info` WHERE `industry` IS NOT NULL AND `industry` &lt;&gt; '' ORDER BY `industry`</select>
+    <select id="distinctExchanges" resultType="string">SELECT DISTINCT `exchange` FROM `stock_info` WHERE `exchange` IS NOT NULL AND `exchange` &lt;&gt; '' ORDER BY `exchange`</select>
+    <select id="crawlerStocks" resultType="com.li.stock.domain.vo.StockInfoVO">
+        SELECT <include refid="columns"/>
+        FROM `stock_info`
+        WHERE `secid` IS NOT NULL AND `secid` &lt;&gt; ''
+          AND (
+          <foreach collection="prefixes" item="prefix" separator=" OR ">
+              `code` LIKE CONCAT(#{prefix}, '%')
+          </foreach>
+          )
+        ORDER BY `code`
+        <if test="limit &gt; 0">LIMIT #{limit}</if>
+    </select>
+    <insert id="upsertCrawlerStocks">
+        INSERT INTO `stock_info`
+        (`code`,`name`,`market`,`secid`,`board`,`exchange`)
+        VALUES
+        <foreach collection="list" item="item" separator=",">
+            (#{item.code},#{item.name},#{item.market},#{item.secid},#{item.board},#{item.exchange})
+        </foreach>
+        ON DUPLICATE KEY UPDATE
+        `name`=VALUES(`name`),`market`=VALUES(`market`),`secid`=VALUES(`secid`),
+        `board`=VALUES(`board`),`exchange`=VALUES(`exchange`)
+    </insert>
+</mapper>

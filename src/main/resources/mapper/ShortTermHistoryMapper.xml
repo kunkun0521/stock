@@ -1,0 +1,170 @@
+<?xml version="1.0" encoding="UTF-8" ?>
+<!DOCTYPE mapper PUBLIC "-//mybatis.org//DTD Mapper 3.0//EN" "https://mybatis.org/dtd/mybatis-3-mapper.dtd">
+<mapper namespace="com.li.stock.mapper.ShortTermHistoryMapper">
+    <sql id="summaryWhere">
+        WHERE f20.`run_id` = #{runId}
+          AND f20.`horizon_days` = 20
+        <if test="keyword != null and keyword != ''">
+            AND (f20.`code` LIKE CONCAT('%', #{keyword}, '%') OR i.`name` LIKE CONCAT('%', #{keyword}, '%'))
+        </if>
+        <if test="minProbability != null">
+            AND f20.`target15_probability` &gt;= #{minProbability}
+        </if>
+    </sql>
+
+    <sql id="summaryOrder">
+        <choose>
+            <when test="sortBy == 'predictedCum5'">f5.`predicted_cumulative_return`</when>
+            <when test="sortBy == 'predictedCum10'">f10.`predicted_cumulative_return`</when>
+            <when test="sortBy == 'predictedCum15'">f15.`predicted_cumulative_return`</when>
+            <when test="sortBy == 'predictedCum20'">f20.`predicted_cumulative_return`</when>
+            <otherwise>f20.`forecast_score`</otherwise>
+        </choose>
+        <choose>
+            <when test="sortDirection == 'asc'">ASC</when>
+            <otherwise>DESC</otherwise>
+        </choose>, f20.`forecast_score` DESC, f20.`target15_probability` DESC, f20.`code`
+    </sql>
+
+    <insert id="createRun" useGeneratedKeys="true" keyProperty="id" keyColumn="id">
+        INSERT INTO `stock_forecast_run`
+        (`forecast_date`, `adjustflag`, `source_latest_date`, `model_version`, `stock_count`)
+        VALUES (#{forecastDate}, #{adjustFlag}, #{sourceLatestDate}, #{modelVersion}, #{stockCount})
+    </insert>
+
+    <insert id="savePredictions">
+        INSERT INTO `stock_forecast_prediction`
+        (`run_id`, `code`, `market`, `forecast_date`, `adjustflag`, `horizon_days`,
+         `predicted_daily_return`, `predicted_cumulative_return`, `target15_probability`,
+         `confidence`, `forecast_score`, `analog_count`, `evaluation_status`)
+        VALUES
+        <foreach collection="list" item="item" separator=",">
+            (#{item.runId}, #{item.code}, #{item.market}, #{item.forecastDate}, #{item.adjustFlag},
+             #{item.horizonDays}, #{item.predictedDailyReturn}, #{item.predictedCumulativeReturn},
+             #{item.target15Probability}, #{item.confidence}, #{item.forecastScore},
+             #{item.analogCount}, #{item.evaluationStatus})
+        </foreach>
+        ON DUPLICATE KEY UPDATE
+        `predicted_daily_return`=VALUES(`predicted_daily_return`),
+        `predicted_cumulative_return`=VALUES(`predicted_cumulative_return`),
+        `target15_probability`=VALUES(`target15_probability`),
+        `confidence`=VALUES(`confidence`),
+        `forecast_score`=VALUES(`forecast_score`),
+        `analog_count`=VALUES(`analog_count`)
+    </insert>
+
+    <select id="listRuns" resultType="com.li.stock.domain.vo.ShortTermRunVO">
+        SELECT `id`, `forecast_date` AS `forecastDate`, `adjustflag` AS `adjustFlag`,
+               `source_latest_date` AS `sourceLatestDate`, `model_version` AS `modelVersion`,
+               `stock_count` AS `stockCount`, `created_at` AS `createdAt`
+        FROM `stock_forecast_run`
+        WHERE `adjustflag` = #{adjustFlag}
+        ORDER BY `id` DESC
+        LIMIT #{limit}
+    </select>
+
+    <select id="sourceDates" resultType="java.time.LocalDate">
+        SELECT DISTINCT `trade_date`
+        FROM `stock_daily_all`
+        WHERE `adjustflag` = #{adjustFlag}
+        ORDER BY `trade_date` DESC
+        LIMIT #{limit}
+    </select>
+
+    <select id="findRun" resultType="com.li.stock.domain.vo.ShortTermRunVO">
+        SELECT `id`, `forecast_date` AS `forecastDate`, `adjustflag` AS `adjustFlag`,
+               `source_latest_date` AS `sourceLatestDate`, `model_version` AS `modelVersion`,
+               `stock_count` AS `stockCount`, `created_at` AS `createdAt`
+        FROM `stock_forecast_run`
+        WHERE `id` = #{runId}
+    </select>
+
+    <select id="summaryCount" resultType="long">
+        SELECT COUNT(*)
+        FROM `stock_forecast_prediction` f20
+        LEFT JOIN `stock_info` i ON i.`code` = f20.`code` AND i.`exchange` = f20.`market`
+        <include refid="summaryWhere"/>
+    </select>
+
+    <select id="summaryPage" resultType="com.li.stock.domain.vo.ShortTermRunSummaryVO">
+        SELECT ROW_NUMBER() OVER (ORDER BY <include refid="summaryOrder"/>) AS `rank`,
+               f20.`code`, i.`name`, i.`market`, i.`exchange`, i.`board`, i.`industry`,
+               f20.`forecast_date` AS `forecastDate`, f20.`run_id` AS `runId`,
+               f20.`forecast_score` AS `score20`,
+               f5.`predicted_cumulative_return` AS `predictedCum5`,
+               f10.`predicted_cumulative_return` AS `predictedCum10`,
+               f15.`predicted_cumulative_return` AS `predictedCum15`,
+               f20.`predicted_cumulative_return` AS `predictedCum20`,
+               f20.`target15_probability` AS `probability20`,
+               f20.`confidence` AS `confidence20`, f20.`analog_count` AS `analogCount20`,
+               f20.`actual_cumulative_return` AS `actualCum20`,
+               f20.`prediction_error` AS `error20`, f20.`evaluation_status` AS `status20`
+        FROM `stock_forecast_prediction` f20
+        LEFT JOIN `stock_forecast_prediction` f5
+          ON f5.`run_id`=f20.`run_id` AND f5.`code`=f20.`code` AND f5.`market`=f20.`market`
+         AND f5.`horizon_days`=5
+        LEFT JOIN `stock_forecast_prediction` f10
+          ON f10.`run_id`=f20.`run_id` AND f10.`code`=f20.`code` AND f10.`market`=f20.`market`
+         AND f10.`horizon_days`=10
+        LEFT JOIN `stock_forecast_prediction` f15
+          ON f15.`run_id`=f20.`run_id` AND f15.`code`=f20.`code` AND f15.`market`=f20.`market`
+         AND f15.`horizon_days`=15
+        LEFT JOIN `stock_info` i ON i.`code`=f20.`code` AND i.`exchange`=f20.`market`
+        <include refid="summaryWhere"/>
+        ORDER BY <include refid="summaryOrder"/>
+        LIMIT #{size} OFFSET #{offset}
+    </select>
+
+    <select id="daily" resultType="com.li.stock.domain.vo.ShortTermDailyForecastVO">
+        SELECT p.`code`, i.`name`, p.`market`, i.`exchange`, i.`board`, i.`industry`,
+               p.`forecast_date` AS `forecastDate`, p.`run_id` AS `runId`,
+               p.`horizon_days` AS `horizonDays`, p.`actual_target_date` AS `actualTargetDate`,
+               p.`predicted_daily_return` AS `predictedDailyReturn`,
+               p.`predicted_cumulative_return` AS `predictedCumulativeReturn`,
+               p.`target15_probability` AS `target15Probability`, p.`confidence`,
+               p.`forecast_score` AS `forecastScore`, p.`actual_daily_return` AS `actualDailyReturn`,
+               p.`actual_cumulative_return` AS `actualCumulativeReturn`,
+               p.`prediction_error` AS `predictionError`, p.`evaluation_status` AS `evaluationStatus`
+        FROM `stock_forecast_prediction` p
+        LEFT JOIN `stock_info` i ON i.`code`=p.`code` AND i.`exchange`=p.`market`
+        WHERE p.`run_id` = #{runId} AND p.`code` = #{code}
+        ORDER BY p.`horizon_days`
+    </select>
+
+    <select id="predictionRows" resultType="com.li.stock.domain.model.ForecastPrediction">
+        SELECT `run_id` AS `runId`, `code`, `market`, `forecast_date` AS `forecastDate`,
+               `adjustflag` AS `adjustFlag`, `horizon_days` AS `horizonDays`,
+               `predicted_daily_return` AS `predictedDailyReturn`,
+               `predicted_cumulative_return` AS `predictedCumulativeReturn`,
+               `target15_probability` AS `target15Probability`, `confidence`,
+               `forecast_score` AS `forecastScore`, `analog_count` AS `analogCount`,
+               `actual_target_date` AS `actualTargetDate`, `actual_daily_return` AS `actualDailyReturn`,
+               `actual_cumulative_return` AS `actualCumulativeReturn`,
+               `prediction_error` AS `predictionError`, `evaluation_status` AS `evaluationStatus`,
+               `evaluated_at` AS `evaluatedAt`
+        FROM `stock_forecast_prediction`
+        WHERE `run_id` = #{runId}
+        ORDER BY `code`, `market`, `horizon_days`
+    </select>
+
+    <insert id="saveEvaluations">
+        INSERT INTO `stock_forecast_prediction`
+        (`run_id`, `code`, `market`, `forecast_date`, `adjustflag`, `horizon_days`,
+         `actual_target_date`, `actual_daily_return`, `actual_cumulative_return`,
+         `prediction_error`, `evaluation_status`, `evaluated_at`)
+        VALUES
+        <foreach collection="list" item="item" separator=",">
+            (#{item.runId}, #{item.code}, #{item.market}, #{item.forecastDate}, #{item.adjustFlag},
+             #{item.horizonDays}, #{item.actualTargetDate}, #{item.actualDailyReturn},
+             #{item.actualCumulativeReturn}, #{item.predictionError}, #{item.evaluationStatus},
+             #{item.evaluatedAt})
+        </foreach>
+        ON DUPLICATE KEY UPDATE
+        `actual_target_date`=VALUES(`actual_target_date`),
+        `actual_daily_return`=VALUES(`actual_daily_return`),
+        `actual_cumulative_return`=VALUES(`actual_cumulative_return`),
+        `prediction_error`=VALUES(`prediction_error`),
+        `evaluation_status`=VALUES(`evaluation_status`),
+        `evaluated_at`=VALUES(`evaluated_at`)
+    </insert>
+</mapper>

@@ -1,8 +1,11 @@
 package com.li.stock.config;
 
 import jakarta.servlet.FilterChain;
+import jakarta.servlet.ReadListener;
 import jakarta.servlet.ServletException;
+import jakarta.servlet.ServletInputStream;
 import jakarta.servlet.http.HttpServletRequest;
+import jakarta.servlet.http.HttpServletRequestWrapper;
 import jakarta.servlet.http.HttpServletResponse;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
@@ -10,28 +13,44 @@ import org.springframework.core.Ordered;
 import org.springframework.core.annotation.Order;
 import org.springframework.stereotype.Component;
 import org.springframework.web.filter.OncePerRequestFilter;
-import org.springframework.web.util.ContentCachingRequestWrapper;
+import org.springframework.web.util.ContentCachingResponseWrapper;
 
+import java.io.BufferedReader;
+import java.io.ByteArrayInputStream;
 import java.io.IOException;
+import java.io.InputStreamReader;
+import java.nio.charset.Charset;
 import java.nio.charset.StandardCharsets;
+import java.util.Enumeration;
+import java.util.LinkedHashMap;
+import java.util.Locale;
+import java.util.Map;
+import java.util.Set;
 import java.util.UUID;
 
 /**
- * 接口调用日志：每个 /api/** 请求在进入和返回时各打印一条，
- * 内容包含请求 ID、方法、路径、查询参数、请求体（POST）、客户端 IP、耗时与状态码。
- * <p>只做日志，不参与任何业务处理，也不改变请求/响应内容。</p>
+ * 接口调用日志：每个 /api/** 请求打印完整的调用信息——
+ * 请求行（方法/路径/参数）、请求头、请求体、状态码、耗时、响应头与响应体。
+ * <p>只做日志，不参与任何业务处理；请求体用可重复读的包装类传给下游，
+ * 响应内容原样写回客户端，不改变任何接口返回。</p>
+ * <p>用独立 logger 名 {@code API_ACCESS}，可在配置里单独开关：logging.level.API_ACCESS=OFF</p>
  */
 @Component
 @Order(Ordered.HIGHEST_PRECEDENCE + 100)
 public class ApiLoggingFilter extends OncePerRequestFilter {
 
-    /** 独立 logger 名称，方便在配置里单独控制：logging.level.API_ACCESS=INFO */
     private static final Logger log = LoggerFactory.getLogger("API_ACCESS");
 
     private static final String API_PREFIX = "/api";
-    private static final int MAX_BODY_LEN = 800;
-    /** 请求体缓存上限，超过部分不进日志 */
-    private static final int CACHE_LIMIT = 4096;
+    /** 请求体缓存上限（字节），超过不读取、不打印 */
+    private static final int CACHE_LIMIT = 8192;
+    /** 日志里请求体 / 响应体最多打印的字符数 */
+    private static final int MAX_LOG_LEN = 1500;
+    /** 脱敏的请求头 */
+    private static final Set<String> SENSITIVE_HEADERS =
+            Set.of("authorization", "cookie", "set-cookie", "proxy-authorization");
+    /** 脱敏的表单字段 */
+    private static final Set<String> SENSITIVE_PARAMS = Set.of("password", "token", "secret", "key");
 
     @Override
     protected boolean shouldNotFilter(HttpServletRequest request) {
@@ -43,48 +62,149 @@ public class ApiLoggingFilter extends OncePerRequestFilter {
             throws ServletException, IOException {
         long start = System.nanoTime();
         String reqId = UUID.randomUUID().toString().substring(0, 8);
-        ContentCachingRequestWrapper wrapped = new ContentCachingRequestWrapper(request, CACHE_LIMIT);
-
-        String uri = request.getRequestURI();
+        String method = request.getMethod();
         String query = request.getQueryString();
-        String target = query == null ? uri : uri + "?" + query;
+        String target = request.getRequestURI() + (query == null ? "" : "?" + query);
 
-        log.info("[{}] 请求开始  {} {}  客户端IP={}", reqId, request.getMethod(), target, clientIp(request));
+        // 1) 请求阶段：先把请求体读出来缓存，再用可重复读的包装类传给下游
+        HttpServletRequest wrappedRequest = request;
+        String bodyText = "";
+        try {
+            String contentType = request.getContentType();
+            boolean form = contentType != null
+                    && contentType.toLowerCase(Locale.ROOT).startsWith("application/x-www-form-urlencoded");
+            if (form) {
+                // 表单先触发容器解析参数，保证后面的 @RequestParam 仍能取到值
+                bodyText = formText(request.getParameterMap());
+            } else if (request.getContentLengthLong() <= CACHE_LIMIT) {
+                byte[] body = request.getInputStream().readAllBytes();
+                wrappedRequest = new CachedBodyRequestWrapper(request, body);
+                bodyText = new String(body, charset(request));
+            } else {
+                bodyText = "(请求体超过 " + CACHE_LIMIT + " B，未读取打印)";
+            }
+
+            log.info("[{}] ======== 接口调用开始 ========", reqId);
+            log.info("[{}] 请求行: {} {} | 客户端IP={}", reqId, method, target, clientIp(request));
+            log.info("[{}] 请求头: {}", reqId, headers(request));
+            if (!bodyText.isBlank()) {
+                log.info("[{}] 请求体: {}", reqId, brief(bodyText));
+            }
+        } catch (Exception e) {
+            log.error("[{}] 请求日志打印异常（已降级为不缓存请求体，不影响接口）", reqId, e);
+            wrappedRequest = request;
+        }
+
+        ContentCachingResponseWrapper wrappedResponse = new ContentCachingResponseWrapper(response);
 
         try {
-            chain.doFilter(wrapped, response);
+            chain.doFilter(wrappedRequest, wrappedResponse);
         } catch (IOException | ServletException | RuntimeException ex) {
-            log.error("[" + reqId + "] 接口执行异常 " + request.getMethod() + " " + target, ex);
+            log.error("[{}] 接口执行异常: {} {}", reqId, method, target, ex);
             throw ex;
         } finally {
-            long costMs = (System.nanoTime() - start) / 1_000_000;
-            int status = response.getStatus();
-            String body = requestBody(wrapped);
-            String line = String.format("[%s] 请求结束  HTTP %d  %s %s  耗时=%dms%s",
-                    reqId, status, request.getMethod(), target, costMs,
-                    body.isEmpty() ? "" : "  请求体=" + body);
+            // 2) 先把缓存的响应内容原样写回真实响应，这一步必须最先做
+            byte[] respBytes = wrappedResponse.getContentAsByteArray();
+            try {
+                wrappedResponse.copyBodyToResponse();
+            } catch (IOException e) {
+                log.error("[{}] 响应内容回写失败", reqId, e);
+            }
 
-            if (status >= 500) {
-                log.error(line);
-            } else if (status >= 400) {
-                log.warn(line);
-            } else {
-                log.info(line);
+            // 3) 日志整体兜底：打印日志出任何问题都不得影响接口返回
+            try {
+                long costMs = (System.nanoTime() - start) / 1_000_000;
+                int status = wrappedResponse.getStatus();
+                String contentType = response.getContentType();
+
+                logEnd(status, "[{}] 请求结束: HTTP {}  {} {} | 耗时={}ms | 响应类型={} | 响应大小={} B",
+                        reqId, status, method, target, costMs,
+                        contentType == null ? "-" : contentType, respBytes.length);
+                logEnd(status, "[{}] 响应头: {}", reqId, headers(response));
+                logEnd(status, "[{}] 响应体({} B): {}", reqId, respBytes.length,
+                        brief(new String(respBytes, StandardCharsets.UTF_8)));
+                logEnd(status, "[{}] ======== 接口调用结束 ========", reqId);
+            } catch (Exception e) {
+                log.error("[{}] 响应日志打印异常（不影响接口）", reqId, e);
             }
         }
     }
 
-    /** 只打印 POST/PUT 这类带体的请求，且截断，避免日志被大报文刷屏。 */
-    private String requestBody(ContentCachingRequestWrapper request) {
-        byte[] buf = request.getContentAsByteArray();
-        if (buf.length == 0) {
+    /** 按状态码选择日志级别：5xx ERROR / 4xx WARN / 其它 INFO。 */
+    private void logEnd(int status, String format, Object... args) {
+        if (status >= 500) {
+            log.error(format, args);
+        } else if (status >= 400) {
+            log.warn(format, args);
+        } else {
+            log.info(format, args);
+        }
+    }
+
+    private String headers(HttpServletRequest request) {
+        Map<String, String> map = new LinkedHashMap<>();
+        Enumeration<String> names = request.getHeaderNames();
+        if (names != null) {
+            while (names.hasMoreElements()) {
+                String name = names.nextElement();
+                map.put(name, headerValue(name, request.getHeader(name)));
+            }
+        }
+        return map.isEmpty() ? "{}" : map.toString();
+    }
+
+    private String headers(HttpServletResponse response) {
+        Map<String, String> map = new LinkedHashMap<>();
+        for (String name : response.getHeaderNames()) {
+            map.put(name, headerValue(name, response.getHeader(name)));
+        }
+        return map.isEmpty() ? "{}" : map.toString();
+    }
+
+    private String headerValue(String name, String value) {
+        if (value == null) {
             return "";
         }
-        String body = new String(buf, StandardCharsets.UTF_8).replaceAll("\\s+", " ").trim();
-        if (body.length() > MAX_BODY_LEN) {
-            return body.substring(0, MAX_BODY_LEN) + "...(已截断)";
+        if (SENSITIVE_HEADERS.contains(name.toLowerCase(Locale.ROOT))) {
+            return "***";
         }
-        return body;
+        return value.length() > 120 ? value.substring(0, 120) + "..." : value;
+    }
+
+    /** 表单 body 的参数等价形式，含脱敏。 */
+    private String formText(Map<String, String[]> params) {
+        StringBuilder sb = new StringBuilder();
+        params.forEach((name, values) -> {
+            for (String value : values) {
+                if (!sb.isEmpty()) {
+                    sb.append('&');
+                }
+                boolean masked = SENSITIVE_PARAMS.stream().anyMatch(k -> name.toLowerCase(Locale.ROOT).contains(k));
+                sb.append(name).append('=').append(masked ? "***" : value);
+            }
+        });
+        return sb.toString();
+    }
+
+    /** 压成单行并截断，避免大 JSON 刷屏。 */
+    private String brief(String raw) {
+        String text = raw.replaceAll("\\s+", " ").trim();
+        if (text.length() > MAX_LOG_LEN) {
+            return text.substring(0, MAX_LOG_LEN) + "...(已截断，原文 " + text.length() + " 字符)";
+        }
+        return text;
+    }
+
+    private Charset charset(HttpServletRequest request) {
+        String encoding = request.getCharacterEncoding();
+        if (encoding == null) {
+            return StandardCharsets.UTF_8;
+        }
+        try {
+            return Charset.forName(encoding);
+        } catch (Exception e) {
+            return StandardCharsets.UTF_8;
+        }
     }
 
     private String clientIp(HttpServletRequest request) {
@@ -93,5 +213,77 @@ public class ApiLoggingFilter extends OncePerRequestFilter {
             return forwarded.split(",")[0].trim();
         }
         return request.getRemoteAddr();
+    }
+
+    /**
+     * 可重复读取请求体的包装类：日志先把 body 读走了，这里基于缓存字节重新提供输入流，
+     * 保证下游 @RequestBody 等仍能正常读取。
+     */
+    private static class CachedBodyRequestWrapper extends HttpServletRequestWrapper {
+
+        private final byte[] body;
+
+        CachedBodyRequestWrapper(HttpServletRequest request, byte[] body) {
+            super(request);
+            this.body = body;
+        }
+
+        @Override
+        public ServletInputStream getInputStream() {
+            ByteArrayInputStream source = new ByteArrayInputStream(body);
+            return new ServletInputStream() {
+                @Override
+                public int read() {
+                    return source.read();
+                }
+
+                @Override
+                public int read(byte[] b, int off, int len) {
+                    return source.read(b, off, len);
+                }
+
+                @Override
+                public boolean isFinished() {
+                    return source.available() == 0;
+                }
+
+                @Override
+                public boolean isReady() {
+                    return true;
+                }
+
+                @Override
+                public void setReadListener(ReadListener listener) {
+                    // 同步读取，无需异步监听
+                }
+            };
+        }
+
+        @Override
+        public BufferedReader getReader() {
+            return new BufferedReader(new InputStreamReader(getInputStream(), charsetOf((HttpServletRequest) getRequest())));
+        }
+
+        @Override
+        public int getContentLength() {
+            return body.length;
+        }
+
+        @Override
+        public long getContentLengthLong() {
+            return body.length;
+        }
+
+        private static Charset charsetOf(HttpServletRequest request) {
+            String encoding = request.getCharacterEncoding();
+            if (encoding == null) {
+                return StandardCharsets.UTF_8;
+            }
+            try {
+                return Charset.forName(encoding);
+            } catch (Exception e) {
+                return StandardCharsets.UTF_8;
+            }
+        }
     }
 }

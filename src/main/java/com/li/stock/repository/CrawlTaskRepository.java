@@ -35,4 +35,9 @@ public class CrawlTaskRepository {
     public void finish(long id, String status, int successCount, int failCount, String remark) {
         mapper.finish(id, status, successCount, failCount, remark);
     }
+
+    /** 清理上次进程遗留的 running 任务，返回处理的条数。 */
+    public int interruptStaleRunning() {
+        return mapper.interruptStaleRunning();
+    }
 }

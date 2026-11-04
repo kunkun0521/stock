@@ -28,4 +28,7 @@ public interface CrawlTaskMapper {
                @Param("successCount") int successCount,
                @Param("failCount") int failCount,
                @Param("remark") String remark);
+
+    /** 应用启动时把上次进程遗留下的 running 任务标记为中断。 */
+    int interruptStaleRunning();
 }

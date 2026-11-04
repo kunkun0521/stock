@@ -36,4 +36,11 @@
             `success_count`=#{successCount},`fail_count`=#{failCount},`remark`=#{remark}
         WHERE `id`=#{id}
     </update>
+
+    <update id="interruptStaleRunning">
+        UPDATE `crawl_log`
+        SET `end_time`=CURRENT_TIMESTAMP,`status`='failed',
+            `remark`=CONCAT('服务重启，任务被标记为中断（原备注：', IFNULL(`remark`,''), '）')
+        WHERE `status`='running'
+    </update>
 </mapper>

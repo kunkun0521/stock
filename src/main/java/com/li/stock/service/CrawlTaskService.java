@@ -12,7 +12,10 @@ import com.li.stock.integration.BaoStockClient;
 import com.li.stock.repository.CrawlTaskRepository;
 import com.li.stock.repository.StockDailyRepository;
 import com.li.stock.repository.StockInfoRepository;
+import jakarta.annotation.PostConstruct;
 import jakarta.annotation.PreDestroy;
+import org.slf4j.Logger;
+import org.slf4j.LoggerFactory;
 import org.springframework.stereotype.Service;
 
 import java.math.BigDecimal;
@@ -37,6 +40,7 @@ import java.util.concurrent.atomic.AtomicBoolean;
  */
 @Service
 public class CrawlTaskService {
+    private static final Logger log = LoggerFactory.getLogger(CrawlTaskService.class);
     private static final int DEFAULT_DAYS_BACK = 548;
     private static final int MAX_DAYS_BACK = 3650;
     private static final int DEFAULT_DELAY_MILLIS = 1500;
@@ -60,6 +64,23 @@ public class CrawlTaskService {
         this.taskRepository = taskRepository;
         this.stockInfoRepository = stockInfoRepository;
         this.stockDailyRepository = stockDailyRepository;
+    }
+
+    /**
+     * 抓取任务只在内存线程中执行，应用重启后数据库里会遗留永远"running"的僵尸任务。
+     * 启动时统一标记为失败，避免前端误以为还有任务在跑。
+     */
+    @PostConstruct
+    public void interruptStaleTasksOnStartup() {
+        try {
+            int count = taskRepository.interruptStaleRunning();
+            if (count > 0) {
+                log.info("已将 {} 个上次进程遗留的抓取任务标记为中断", count);
+            }
+        } catch (RuntimeException ex) {
+            // 启动清理失败不影响应用正常运行
+            log.warn("清理遗留抓取任务失败：{}", ex.getMessage());
+        }
     }
 
     public CrawlTaskVO start(CrawlTaskRequest request) {
@@ -100,7 +121,7 @@ public class CrawlTaskService {
         int success = 0;
         int fail = 0;
         List<String> errors = new ArrayList<>();
-        try (BaoStockClient client = new BaoStockClient(objectMapper, 10000, 30000)) {
+        try (BaoStockClient client = new BaoStockClient(objectMapper, 10000, 60000)) {
             LocalDate today = LocalDate.now();
             boolean loggedIn = false;
             List<StockInfoVO> stocks = config.refreshStockList()

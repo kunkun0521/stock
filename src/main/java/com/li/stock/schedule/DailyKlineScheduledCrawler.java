@@ -107,7 +107,6 @@ public class DailyKlineScheduledCrawler {
             log.info("定时抓取已停用（stock.scheduled-crawl.enabled=false），跳过 {} 前缀任务", prefix);
             return;
         }
-        log.info("定时抓取触发：{} 前缀", prefix);
         executor.submit(() -> execute(prefix));
     }
 

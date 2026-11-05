@@ -21,16 +21,14 @@ import java.io.IOException;
 import java.io.InputStreamReader;
 import java.nio.charset.Charset;
 import java.nio.charset.StandardCharsets;
-import java.util.Enumeration;
-import java.util.LinkedHashMap;
 import java.util.Locale;
 import java.util.Map;
 import java.util.Set;
 import java.util.UUID;
 
 /**
- * 接口调用日志：每个 /api/** 请求打印完整的调用信息——
- * 请求行（方法/路径/参数）、请求头、请求体、状态码、耗时、响应头与响应体。
+ * 接口访问日志：每个 /api/** 请求打印两行——
+ * 进入时一行（方法/路径/客户端IP/请求体），结束时一行（状态码/耗时/响应大小）。
  * <p>只做日志，不参与任何业务处理；请求体用可重复读的包装类传给下游，
  * 响应内容原样写回客户端，不改变任何接口返回。</p>
  * <p>用独立 logger 名 {@code API_ACCESS}，可在配置里单独开关：logging.level.API_ACCESS=OFF</p>
@@ -44,11 +42,8 @@ public class ApiLoggingFilter extends OncePerRequestFilter {
     private static final String API_PREFIX = "/api";
     /** 请求体缓存上限（字节），超过不读取、不打印 */
     private static final int CACHE_LIMIT = 8192;
-    /** 日志里请求体 / 响应体最多打印的字符数 */
+    /** 日志里请求体最多打印的字符数 */
     private static final int MAX_LOG_LEN = 1500;
-    /** 脱敏的请求头 */
-    private static final Set<String> SENSITIVE_HEADERS =
-            Set.of("authorization", "cookie", "set-cookie", "proxy-authorization");
     /** 脱敏的表单字段 */
     private static final Set<String> SENSITIVE_PARAMS = Set.of("password", "token", "secret", "key");
 
@@ -84,12 +79,8 @@ public class ApiLoggingFilter extends OncePerRequestFilter {
                 bodyText = "(请求体超过 " + CACHE_LIMIT + " B，未读取打印)";
             }
 
-            log.info("[{}] ======== 接口调用开始 ========", reqId);
-            log.info("[{}] 请求行: {} {} | 客户端IP={}", reqId, method, target, clientIp(request));
-            log.info("[{}] 请求头: {}", reqId, headers(request));
-            if (!bodyText.isBlank()) {
-                log.info("[{}] 请求体: {}", reqId, brief(bodyText));
-            }
+            log.info("[{}] --> {} {} | IP={}{}", reqId, method, target, clientIp(request),
+                    bodyText.isBlank() ? "" : " | 请求体: " + brief(bodyText));
         } catch (Exception e) {
             log.error("[{}] 请求日志打印异常（已降级为不缓存请求体，不影响接口）", reqId, e);
             wrappedRequest = request;
@@ -115,15 +106,9 @@ public class ApiLoggingFilter extends OncePerRequestFilter {
             try {
                 long costMs = (System.nanoTime() - start) / 1_000_000;
                 int status = wrappedResponse.getStatus();
-                String contentType = response.getContentType();
 
-                logEnd(status, "[{}] 请求结束: HTTP {}  {} {} | 耗时={}ms | 响应类型={} | 响应大小={} B",
-                        reqId, status, method, target, costMs,
-                        contentType == null ? "-" : contentType, respBytes.length);
-                logEnd(status, "[{}] 响应头: {}", reqId, headers(response));
-                logEnd(status, "[{}] 响应体({} B): {}", reqId, respBytes.length,
-                        brief(new String(respBytes, StandardCharsets.UTF_8)));
-                logEnd(status, "[{}] ======== 接口调用结束 ========", reqId);
+                logEnd(status, "[{}] <-- {} {} | HTTP {} | 耗时={}ms | 响应大小={} B",
+                        reqId, method, target, status, costMs, respBytes.length);
             } catch (Exception e) {
                 log.error("[{}] 响应日志打印异常（不影响接口）", reqId, e);
             }
@@ -139,36 +124,6 @@ public class ApiLoggingFilter extends OncePerRequestFilter {
         } else {
             log.info(format, args);
         }
-    }
-
-    private String headers(HttpServletRequest request) {
-        Map<String, String> map = new LinkedHashMap<>();
-        Enumeration<String> names = request.getHeaderNames();
-        if (names != null) {
-            while (names.hasMoreElements()) {
-                String name = names.nextElement();
-                map.put(name, headerValue(name, request.getHeader(name)));
-            }
-        }
-        return map.isEmpty() ? "{}" : map.toString();
-    }
-
-    private String headers(HttpServletResponse response) {
-        Map<String, String> map = new LinkedHashMap<>();
-        for (String name : response.getHeaderNames()) {
-            map.put(name, headerValue(name, response.getHeader(name)));
-        }
-        return map.isEmpty() ? "{}" : map.toString();
-    }
-
-    private String headerValue(String name, String value) {
-        if (value == null) {
-            return "";
-        }
-        if (SENSITIVE_HEADERS.contains(name.toLowerCase(Locale.ROOT))) {
-            return "***";
-        }
-        return value.length() > 120 ? value.substring(0, 120) + "..." : value;
     }
 
     /** 表单 body 的参数等价形式，含脱敏。 */

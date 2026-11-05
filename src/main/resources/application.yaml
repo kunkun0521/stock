@@ -37,3 +37,14 @@ mybatis:
   configuration:
     map-underscore-to-camel-case: true
     cache-enabled: false
+
+# 每日定时日线抓取：00 前缀 17:00、60 前缀 18:50、30 前缀 20:20，
+# 每次保证覆盖近 500 个交易日（730 个自然日），复权口径为前复权 + 不复权。
+stock:
+  scheduled-crawl:
+    enabled: true
+    days-back: 730
+    delay-millis: 1500
+    cron-00: "0 0 17 * * ?"
+    cron-60: "0 50 18 * * ?"
+    cron-30: "0 20 20 * * ?"

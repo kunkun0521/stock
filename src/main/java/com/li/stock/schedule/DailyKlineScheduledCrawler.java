@@ -146,18 +146,29 @@ public class DailyKlineScheduledCrawler {
             if (stocks.isEmpty()) {
                 throw new IllegalStateException("BaoStock 没有返回 " + prefix + " 前缀的股票列表");
             }
-            log.info("定时抓取 {} 前缀：共 {} 只股票，开始增量抓取日线", prefix, stocks.size());
-            taskRepository.updateProgress(taskId, stocks.size(), 0, 0,
-                    "定时任务，共 " + stocks.size() + " 只，开始增量抓取日线");
-
             LocalDate initialStart = today.minusDays(daysBack);
             Map<String, CrawlerDateRangeVO> dateRanges = stockDailyRepository.crawlerDateRanges(
                     stocks.stream().map(StockInfoVO::code).toList(), ADJUST_FLAGS);
 
+            // 已同步到今日（含历史前段）就整轮跳过，一次 BaoStock 请求都不发；
+            // 否则先查一次交易日历拿到最近交易日，避免周末/节假日对每只股票空发请求。
+            boolean needsSync = stocks.stream()
+                    .anyMatch(stock -> needsSync(stock, today, initialStart, dateRanges));
+            if (!needsSync) {
+                taskRepository.finish(taskId, "done", 0, 0,
+                        "全部股票已同步到今日数据，未调用 BaoStock 接口");
+                log.info("定时抓取 {} 前缀：{} 只股票均已同步到今日，跳过接口调用", prefix, stocks.size());
+                return;
+            }
+            LocalDate syncEnd = lastTradeDay(client, today);
+            log.info("定时抓取 {} 前缀：共 {} 只股票，同步截止 {}，开始增量抓取日线", prefix, stocks.size(), syncEnd);
+            taskRepository.updateProgress(taskId, stocks.size(), 0, 0,
+                    "定时任务，共 " + stocks.size() + " 只，同步截止 " + syncEnd + "，开始增量抓取日线");
+
             for (int index = 0; index < stocks.size(); index++) {
                 StockInfoVO stock = stocks.get(index);
                 try {
-                    int requests = crawlOneStock(client, stock, initialStart, today, dateRanges);
+                    int requests = crawlOneStock(client, stock, initialStart, syncEnd, dateRanges);
                     success++;
                     updateProgressIfNeeded(taskId, stocks.size(), index, success, fail,
                             "已完成 " + (index + 1) + "/" + stocks.size() + "：" + stock.code()
@@ -187,15 +198,39 @@ public class DailyKlineScheduledCrawler {
         }
     }
 
+    /** 数据库缺少历史前段、或最新日期还没到今天时，才需要访问 BaoStock。 */
+    private boolean needsSync(StockInfoVO stock, LocalDate today, LocalDate initialStart,
+                              Map<String, CrawlerDateRangeVO> dateRanges) {
+        return ADJUST_FLAGS.stream().anyMatch(adjustFlag -> {
+            CrawlerDateRangeVO range = dateRanges.get(stock.code() + "#" + adjustFlag);
+            return range == null || range.firstDate().isAfter(initialStart)
+                    || range.latestDate().isBefore(today);
+        });
+    }
+
+    /**
+     * 最近一个交易日（不超过今天）。交易日历查询失败时退化为今天，
+     * 此时非交易日会对每只股票发出返回空结果的请求，但不影响正确性。
+     */
+    private LocalDate lastTradeDay(BaoStockClient client, LocalDate today) {
+        try {
+            List<LocalDate> days = client.queryTradeDates(today.minusDays(31), today);
+            if (!days.isEmpty()) return days.get(days.size() - 1);
+        } catch (RuntimeException ex) {
+            log.warn("查询 BaoStock 交易日历失败，按今天作为同步截止日：{}", rootMessage(ex));
+        }
+        return today;
+    }
+
     /** 与页面抓取相同的增量策略：无记录补全量，否则补齐前段历史和最新后段。 */
     private int crawlOneStock(BaoStockClient client, StockInfoVO stock, LocalDate initialStart,
-                              LocalDate today, Map<String, CrawlerDateRangeVO> dateRanges) {
+                              LocalDate syncEnd, Map<String, CrawlerDateRangeVO> dateRanges) {
         List<StockDailyVO> rows = new ArrayList<>();
         int requestCount = 0;
         for (int adjustFlag : ADJUST_FLAGS) {
             CrawlerDateRangeVO range = dateRanges.get(stock.code() + "#" + adjustFlag);
             if (range == null) {
-                rows.addAll(queryHistory(client, stock, initialStart, today, adjustFlag));
+                rows.addAll(queryHistory(client, stock, initialStart, syncEnd, adjustFlag));
                 requestCount++;
                 continue;
             }
@@ -204,9 +239,10 @@ public class DailyKlineScheduledCrawler {
                         range.firstDate().minusDays(1), adjustFlag));
                 requestCount++;
             }
-            if (range.latestDate().isBefore(today)) {
+            // 最新后段只在数据库还没有最近交易日的数据时才补，已同步的股票不发请求。
+            if (range.latestDate().isBefore(syncEnd)) {
                 rows.addAll(queryHistory(client, stock, range.latestDate().plusDays(1),
-                        today, adjustFlag));
+                        syncEnd, adjustFlag));
                 requestCount++;
             }
         }

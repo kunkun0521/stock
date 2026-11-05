@@ -117,6 +117,23 @@ public final class BaoStockClient implements AutoCloseable {
         }
     }
 
+    /** 查询交易日历，返回区间内所有交易日（is_trading_day=1），升序。 */
+    public List<LocalDate> queryTradeDates(LocalDate from, LocalDate to) {
+        // 消息体与官方 Python 客户端一致：query_trade_dates + userId + 页码 + 每页条数 + 起止日期。
+        // 区间很短（一次任务只查最近 31 天），单页即可返回全部，无需分页循环。
+        Response response = request("33", String.join(SEP,
+                "query_trade_dates", userId, "1", String.valueOf(PAGE_SIZE),
+                from.toString(), to.toString()));
+        response.requireSuccess();
+        List<LocalDate> days = new ArrayList<>();
+        for (Map<String, String> row : response.rows(6, 9)) {
+            if ("1".equals(row.getOrDefault("is_trading_day", ""))) {
+                days.add(LocalDate.parse(row.get("calendar_date")));
+            }
+        }
+        return days;
+    }
+
     /** 查询一只股票一段日期的日线，返回字段名到原始字符串的映射。 */
     public List<Map<String, String>> queryHistory(String secid, LocalDate from, LocalDate to,
                                                    String adjustFlag) {

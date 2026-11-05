@@ -148,13 +148,17 @@ public class CrawlTaskService {
             LocalDate initialStart = today.minusDays(config.daysBack());
             Map<String, CrawlerDateRangeVO> dateRanges = stockDailyRepository.crawlerDateRanges(
                     stocks.stream().map(StockInfoVO::code).toList(), config.fqTypes());
-            if (!loggedIn && stocks.stream().anyMatch(stock -> needsHistory(stock, today, initialStart, config, dateRanges))) {
+            boolean needsSync = stocks.stream()
+                    .anyMatch(stock -> needsHistory(stock, today, initialStart, config, dateRanges));
+            if (!loggedIn && needsSync) {
                 client.login();
             }
+            // 以最近交易日为同步截止日：已入库当日数据的股票不再请求；周末/节假日整体空转也只花一次日历查询。
+            LocalDate syncEnd = needsSync ? lastTradeDay(client, today) : today;
             for (int index = 0; index < stocks.size(); index++) {
                 StockInfoVO stock = stocks.get(index);
                 try {
-                    CrawlResult result = crawlOneStock(client, stock, initialStart, today, config, dateRanges);
+                    CrawlResult result = crawlOneStock(client, stock, initialStart, syncEnd, config, dateRanges);
                     success++;
                     String action = result.requestCount() == 0
                             ? "已是最新，跳过 BaoStock 请求"
@@ -196,7 +200,7 @@ public class CrawlTaskService {
     }
 
     private CrawlResult crawlOneStock(BaoStockClient client, StockInfoVO stock, LocalDate initialStart,
-                                      LocalDate today, CrawlConfig config,
+                                      LocalDate syncEnd, CrawlConfig config,
                                       Map<String, CrawlerDateRangeVO> dateRanges) {
         List<StockDailyVO> rows = new ArrayList<>();
         int requestCount = 0;
@@ -204,7 +208,7 @@ public class CrawlTaskService {
             int adjustFlag = adjustFlagOf(fqType);
             CrawlerDateRangeVO range = dateRanges.get(stock.code() + "#" + adjustFlag);
             if (range == null) {
-                rows.addAll(queryHistory(client, stock, initialStart, today, adjustFlag));
+                rows.addAll(queryHistory(client, stock, initialStart, syncEnd, adjustFlag));
                 requestCount++;
                 continue;
             }
@@ -213,13 +217,28 @@ public class CrawlTaskService {
                         range.firstDate().minusDays(1), adjustFlag));
                 requestCount++;
             }
-            if (range.latestDate().isBefore(today)) {
+            // 最新后段只在数据库还没有最近交易日的数据时才补，已同步的股票不发请求。
+            if (range.latestDate().isBefore(syncEnd)) {
                 rows.addAll(queryHistory(client, stock, range.latestDate().plusDays(1),
-                        today, adjustFlag));
+                        syncEnd, adjustFlag));
                 requestCount++;
             }
         }
         return new CrawlResult(stockDailyRepository.saveCrawlerBatch(rows), requestCount);
+    }
+
+    /**
+     * 最近一个交易日（不超过今天）。交易日历查询失败时退化为今天，
+     * 此时行为与旧逻辑一致：按自然日尝试增量，非交易日会拿到空结果。
+     */
+    private LocalDate lastTradeDay(BaoStockClient client, LocalDate today) {
+        try {
+            List<LocalDate> days = client.queryTradeDates(today.minusDays(31), today);
+            if (!days.isEmpty()) return days.get(days.size() - 1);
+        } catch (RuntimeException ex) {
+            log.warn("查询 BaoStock 交易日历失败，按今天作为同步截止日：{}", rootMessage(ex));
+        }
+        return today;
     }
 
     private List<StockDailyVO> queryHistory(BaoStockClient client, StockInfoVO stock,

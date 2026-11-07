@@ -12,6 +12,7 @@ import com.li.stock.domain.vo.StockDailyVO;
 import com.li.stock.domain.vo.StockInfoVO;
 import com.li.stock.domain.vo.TAdviceVO;
 import com.li.stock.domain.vo.TDailyPointVO;
+import com.li.stock.domain.vo.TKlinePointVO;
 import com.li.stock.domain.vo.TStrategyConfigVO;
 import com.li.stock.domain.vo.TTradeRecordVO;
 import com.li.stock.domain.vo.TTradingResultVO;
@@ -39,6 +40,8 @@ public class TTradingService {
     private static final int MAX_TRADING_DAYS = 1200;
     /** 指标预热窗口（自然日），保证买入首日就有完整的 MA20 / 20 日支撑压力。 */
     private static final int WARMUP_DAYS = 75;
+    /** 结果附带的历史 K 线根数，够画出趋势又不会让响应体过大。 */
+    private static final int KLINE_LIMIT = 120;
 
     private static final int PRICE_SCALE = 3;
     private static final int MONEY_SCALE = 2;
@@ -75,18 +78,11 @@ public class TTradingService {
         double availableCash = positive(request.availableCash(), "可支配资金");
         int initialShares = request.initialShares() == null ? 0 : Math.max(0, request.initialShares());
         double initialAvgCost = request.initialAvgCost() == null ? 0d : request.initialAvgCost().doubleValue();
-        if (initialShares > 0 && initialAvgCost <= 0) {
-            throw BizException.badRequest("填写已有底仓股数时，必须同时填写大于 0 的底仓成本价");
-        }
         if (initialShares == 0) {
             initialAvgCost = 0d;
         }
-        double initialAssets = availableCash + initialShares * initialAvgCost;
-        double totalCapital = request.totalCapital() == null
-                ? initialAssets
-                : Math.max(request.totalCapital().doubleValue(), initialAssets);
-        if (totalCapital <= 0 || !Double.isFinite(totalCapital)) {
-            throw BizException.badRequest("总资金必须是正数");
+        if (initialAvgCost < 0 || !Double.isFinite(initialAvgCost)) {
+            throw BizException.badRequest("底仓成本价不能为负数");
         }
 
         LocalDate buyDate = request.buyDate();
@@ -110,15 +106,34 @@ public class TTradingService {
             throw BizException.notFound("初始买入日期之后没有行情数据，请换一个更早的日期");
         }
 
+        // 只填了底仓股数时，按买入首日收盘价推定成本价：默认 1000 股也能直接开跑
+        boolean initialCostEstimated = initialShares > 0 && initialAvgCost <= 0;
+        if (initialCostEstimated) {
+            initialAvgCost = bars.get(0).close();
+        }
+        if (initialShares > 0 && (!Double.isFinite(initialAvgCost) || initialAvgCost <= 0)) {
+            throw BizException.badRequest("无法推定底仓成本价，请手工填写大于 0 的成本价");
+        }
+
+        double initialAssets = availableCash + initialShares * initialAvgCost;
+        double totalCapital = request.totalCapital() == null
+                ? initialAssets
+                : Math.max(request.totalCapital().doubleValue(), initialAssets);
+        if (totalCapital <= 0 || !Double.isFinite(totalCapital)) {
+            throw BizException.badRequest("总资金必须是正数");
+        }
+
         TTradingConfig cfg = TTradingConfig.of(request.strategy());
         TTradingSimulator.SimulationResult result = simulator.run(
                 bars, totalCapital, availableCash, initialShares, initialAvgCost, cfg, intraday);
-        return assemble(code, market, adjustFlag, priceMode, request, cfg, result);
+        return assemble(code, market, adjustFlag, priceMode, cfg, result,
+                allBars, bars.get(0).tradeDate(), initialCostEstimated);
     }
 
     private TTradingResultVO assemble(String code, String market, int adjustFlag, String priceMode,
-                                      TTradingRequest request, TTradingConfig cfg,
-                                      TTradingSimulator.SimulationResult result) {
+                                      TTradingConfig cfg, TTradingSimulator.SimulationResult result,
+                                      List<TBar> allBars, LocalDate replayStart,
+                                      boolean initialCostEstimated) {
         TPositionState state = result.state();
         TBar last = result.lastBar();
         double close = last.close();
@@ -165,7 +180,7 @@ public class TTradingService {
         return new TTradingResultVO(
                 code, market, name,
                 equity.isEmpty() ? null : equity.get(0).tradeDate(),
-                last.tradeDate(), equity.size(), adjustFlag,
+                last.tradeDate(), equity.size(), adjustFlag, initialCostEstimated,
                 round(state.totalCapital(), MONEY_SCALE),
                 round(state.initialAssets(), MONEY_SCALE),
                 round(state.availableCash(), MONEY_SCALE),
@@ -185,7 +200,8 @@ public class TTradingService {
                 round(state.feeTotal(), MONEY_SCALE),
                 state.tradeCount(), state.addCount(), state.tBuybackCount(),
                 state.reverseReduceCount(), status, summary,
-                trades, equity, buildAdvices(state, last, cfg), configVO(cfg, priceMode));
+                trades, equity, buildKline(allBars, last.tradeDate(), replayStart),
+                buildAdvices(state, last, cfg), configVO(cfg, priceMode));
     }
 
     /**
@@ -329,6 +345,30 @@ public class TTradingService {
             return lastEntry;
         }
         return state.initialAvgCost() > 0 ? state.initialAvgCost() : state.avgCost();
+    }
+
+    /**
+     * 结果附带查询股票的历史 K 线（含回放区间前的预热行情），前端无需再请求一次行情接口。
+     * 取截至最后一个回放交易日的最近 KLINE_LIMIT 根，样本不足的均线由 Numbers.round 转 null。
+     */
+    private List<TKlinePointVO> buildKline(List<TBar> allBars, LocalDate lastDate, LocalDate replayStart) {
+        int end = 0;
+        while (end < allBars.size() && !allBars.get(end).tradeDate().isAfter(lastDate)) {
+            end++;
+        }
+        int from = Math.max(0, end - KLINE_LIMIT);
+        List<TKlinePointVO> points = new ArrayList<>(end - from);
+        for (int i = from; i < end; i++) {
+            TBar bar = allBars.get(i);
+            points.add(new TKlinePointVO(bar.tradeDate(),
+                    round(bar.open(), PRICE_SCALE), round(bar.high(), PRICE_SCALE),
+                    round(bar.low(), PRICE_SCALE), round(bar.close(), PRICE_SCALE),
+                    round(bar.volume(), 0),
+                    round(bar.ma5(), PRICE_SCALE), round(bar.ma10(), PRICE_SCALE),
+                    round(bar.ma20(), PRICE_SCALE),
+                    !bar.tradeDate().isBefore(replayStart)));
+        }
+        return points;
     }
 
     private static List<TBar> head(List<TBar> bars, int limit) {

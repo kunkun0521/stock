@@ -7,10 +7,11 @@
                 MAX(`tradestatus`) AS `tradestatus`, MAX(`is_st`) AS `is_st`
          FROM `stock_daily_all` WHERE `trade_date` = #{tradeDate} GROUP BY `code`) d
     </sql>
-    <sql id="oneFlag">
-        AND COALESCE(d.`adjustflag`, -1) = (
-            SELECT COALESCE(MIN(d2.`adjustflag`), -1) FROM `stock_daily_all` d2
-            WHERE d2.`code` = d.`code` AND d2.`trade_date` = d.`trade_date`)
+    <!-- 每只股票当天最小复权口径：用派生表一次 GROUP BY + JOIN，替代原来的逐行相关子查询（SQL 层 N+1）。 -->
+    <sql id="minFlag">
+        JOIN (SELECT `code`, COALESCE(MIN(`adjustflag`), -1) AS `flag`
+              FROM `stock_daily_all` WHERE `trade_date` = #{tradeDate} GROUP BY `code`) f
+          ON f.`code` = d.`code` AND COALESCE(d.`adjustflag`, -1) = f.`flag`
     </sql>
 
     <select id="latestTradeDate" resultType="java.time.LocalDate">SELECT MAX(`trade_date`) FROM `stock_daily_all`</select>
@@ -44,9 +45,10 @@
                d.`close` AS `close`, d.`preclose` AS `preclose`, d.`pct_chg` AS `pctChg`, d.`chg_amt` AS `chgAmt`,
                d.`volume` AS `volume`, d.`amount` AS `amount`, d.`turnover` AS `turnover`, d.`amplitude` AS `amplitude`,
                d.`pe_ttm` AS `peTtm`, d.`pb_mrq` AS `pbMrq`, d.`is_st` AS `isSt`, d.`tradestatus` AS `tradeStatus`
-        FROM `stock_daily_all` d LEFT JOIN `stock_info` i ON i.`code` = d.`code`
+        FROM `stock_daily_all` d
+        <include refid="minFlag"/>
+        LEFT JOIN `stock_info` i ON i.`code` = d.`code`
         WHERE d.`trade_date` = #{tradeDate} AND d.`pct_chg` IS NOT NULL
-        <include refid="oneFlag"/>
         <if test="board != null and board != ''">AND i.`board` = #{board}</if>
         <if test="includeSt == false">AND (d.`is_st` IS NULL OR d.`is_st` = 0)</if>
         ORDER BY

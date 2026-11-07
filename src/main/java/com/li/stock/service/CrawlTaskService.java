@@ -2,6 +2,7 @@ package com.li.stock.service;
 
 import com.fasterxml.jackson.databind.ObjectMapper;
 import com.li.stock.common.BizException;
+import com.li.stock.common.MarketCacheWarmer;
 import com.li.stock.domain.query.CrawlTaskRequest;
 import com.li.stock.domain.model.CrawlTask;
 import com.li.stock.domain.vo.CrawlerDateRangeVO;
@@ -50,6 +51,7 @@ public class CrawlTaskService {
     private final CrawlTaskRepository taskRepository;
     private final StockInfoRepository stockInfoRepository;
     private final StockDailyRepository stockDailyRepository;
+    private final MarketCacheWarmer marketCacheWarmer;
     private final ObjectMapper objectMapper = new ObjectMapper();
     private final ExecutorService executor = Executors.newSingleThreadExecutor(r -> {
         Thread thread = new Thread(r, "stock-crawler");
@@ -60,10 +62,12 @@ public class CrawlTaskService {
 
     public CrawlTaskService(CrawlTaskRepository taskRepository,
                             StockInfoRepository stockInfoRepository,
-                            StockDailyRepository stockDailyRepository) {
+                            StockDailyRepository stockDailyRepository,
+                            MarketCacheWarmer marketCacheWarmer) {
         this.taskRepository = taskRepository;
         this.stockInfoRepository = stockInfoRepository;
         this.stockDailyRepository = stockDailyRepository;
+        this.marketCacheWarmer = marketCacheWarmer;
     }
 
     /**
@@ -186,6 +190,8 @@ public class CrawlTaskService {
                     limitText("任务失败：" + rootMessage(ex)));
         } finally {
             running.set(false);
+            // 抓取写入了新行情，后台刷新市场看板缓存，把新增数据加载进缓存。
+            marketCacheWarmer.refreshAsync();
         }
     }
 

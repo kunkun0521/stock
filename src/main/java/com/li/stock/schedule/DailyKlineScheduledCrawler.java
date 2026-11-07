@@ -1,6 +1,7 @@
 package com.li.stock.schedule;
 
 import com.fasterxml.jackson.databind.ObjectMapper;
+import com.li.stock.common.MarketCacheWarmer;
 import com.li.stock.domain.model.CrawlTask;
 import com.li.stock.domain.vo.CrawlerDateRangeVO;
 import com.li.stock.domain.vo.StockDailyVO;
@@ -13,6 +14,8 @@ import jakarta.annotation.PreDestroy;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 import org.springframework.beans.factory.annotation.Value;
+import org.springframework.boot.context.event.ApplicationReadyEvent;
+import org.springframework.context.event.EventListener;
 import org.springframework.scheduling.annotation.Scheduled;
 import org.springframework.stereotype.Component;
 
@@ -20,6 +23,7 @@ import java.math.BigDecimal;
 import java.math.RoundingMode;
 import java.time.LocalDate;
 import java.time.LocalDateTime;
+import java.time.LocalTime;
 import java.util.ArrayList;
 import java.util.LinkedHashMap;
 import java.util.List;
@@ -46,6 +50,10 @@ import java.util.concurrent.atomic.AtomicBoolean;
  *
  * <p>执行进度同样写入 crawl_log 表（taskName 为 daily_kline_scheduled_XX），
  * 可通过现有的 /api/data-crawler/tasks 接口查看。</p>
+ *
+ * <p>启动补跑：定时任务只在应用运行期间触发，应用未启动或电脑睡眠会错过执行。
+ * 每次启动完成后检查各前缀，今日计划时间已过的立即补跑一次（数据已同步时零请求短路），
+ * 可用 {@code stock.scheduled-crawl.catch-up-on-startup=false} 关闭。</p>
  */
 @Component
 public class DailyKlineScheduledCrawler {
@@ -57,6 +65,7 @@ public class DailyKlineScheduledCrawler {
     private final CrawlTaskRepository taskRepository;
     private final StockInfoRepository stockInfoRepository;
     private final StockDailyRepository stockDailyRepository;
+    private final MarketCacheWarmer marketCacheWarmer;
     private final ObjectMapper objectMapper = new ObjectMapper();
     private final ExecutorService executor = Executors.newSingleThreadExecutor(r -> {
         Thread thread = new Thread(r, "stock-scheduled-crawler");
@@ -75,13 +84,25 @@ public class DailyKlineScheduledCrawler {
     /** 每只股票请求之间的间隔，避免触发 BaoStock 限流。 */
     @Value("${stock.scheduled-crawl.delay-millis:1500}")
     private int delayMillis;
+    /** 启动补跑开关：应用启动时把今天已经错过计划时间的前缀补跑一遍。 */
+    @Value("${stock.scheduled-crawl.catch-up-on-startup:false}")
+    private boolean catchUpOnStartup;
+    /** 三个前缀的计划时间，与 @Scheduled 注解上的 cron 保持一致，补跑时从 cron 解析出时分。 */
+    @Value("${stock.scheduled-crawl.cron-00:0 0 17 * * ?}")
+    private String cron00;
+    @Value("${stock.scheduled-crawl.cron-60:0 50 18 * * ?}")
+    private String cron60;
+    @Value("${stock.scheduled-crawl.cron-30:0 20 20 * * ?}")
+    private String cron30;
 
     public DailyKlineScheduledCrawler(CrawlTaskRepository taskRepository,
                                       StockInfoRepository stockInfoRepository,
-                                      StockDailyRepository stockDailyRepository) {
+                                      StockDailyRepository stockDailyRepository,
+                                      MarketCacheWarmer marketCacheWarmer) {
         this.taskRepository = taskRepository;
         this.stockInfoRepository = stockInfoRepository;
         this.stockDailyRepository = stockDailyRepository;
+        this.marketCacheWarmer = marketCacheWarmer;
     }
 
     /** 00 开头（深市主板）：每天 17:00 执行。 */
@@ -100,6 +121,44 @@ public class DailyKlineScheduledCrawler {
     @Scheduled(cron = "${stock.scheduled-crawl.cron-30:0 20 20 * * ?}", zone = "Asia/Shanghai")
     public void crawlPrefix30() {
         submit("30");
+    }
+
+    /**
+     * 启动补跑：@Scheduled 只在应用运行期间触发，应用没开或电脑睡眠就会错过当天的执行。
+     * 启动完成后检查每个前缀——今天的计划时间已过就补跑一次；计划时间未到则留给定时任务。
+     * 数据已同步的前缀在 execute() 里会零请求短路，因此重复启动没有副作用。
+     */
+    @EventListener(ApplicationReadyEvent.class)
+    public void catchUpOnStartup() {
+        if (!enabled || !catchUpOnStartup) return;
+        LocalTime now = LocalTime.now();
+        Map<String, String> prefixCrons = new LinkedHashMap<>();
+        prefixCrons.put("00", cron00);
+        prefixCrons.put("60", cron60);
+        prefixCrons.put("30", cron30);
+        prefixCrons.forEach((prefix, cron) -> {
+            LocalTime planned = scheduledTimeOf(cron);
+            if (planned == null) {
+                log.warn("定时抓取 {} 前缀：无法从 cron [{}] 解析计划时间，跳过启动补跑", prefix, cron);
+                return;
+            }
+            if (now.isBefore(planned)) {
+                log.info("定时抓取 {} 前缀：今日计划时间 {} 未到，等待定时触发", prefix, planned);
+                return;
+            }
+            log.info("定时抓取 {} 前缀：今日计划时间 {} 已过，启动补跑", prefix, planned);
+            executor.submit(() -> execute(prefix));
+        });
+    }
+
+    /** 从六位 cron（秒 分 时 …）中解析每日计划时间，解析失败返回 null。 */
+    private LocalTime scheduledTimeOf(String cron) {
+        try {
+            String[] fields = cron.trim().split("\\s+");
+            return LocalTime.of(Integer.parseInt(fields[2]), Integer.parseInt(fields[1]));
+        } catch (RuntimeException ex) {
+            return null;
+        }
     }
 
     private void submit(String prefix) {
@@ -195,6 +254,8 @@ public class DailyKlineScheduledCrawler {
             log.error("定时抓取 {} 前缀失败：{}", prefix, rootMessage(ex), ex);
         } finally {
             running.set(false);
+            // 无论成败都刷新看板缓存：成功则把新增行情加载进缓存，失败则避免继续返回抓取期间的半旧快照。
+            marketCacheWarmer.refreshAsync();
         }
     }
 

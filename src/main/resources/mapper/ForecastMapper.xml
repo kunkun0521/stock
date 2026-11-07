@@ -1,0 +1,119 @@
+<?xml version="1.0" encoding="UTF-8" ?>
+<!DOCTYPE mapper PUBLIC "-//mybatis.org//DTD Mapper 3.0//EN" "https://mybatis.org/dtd/mybatis-3-mapper.dtd">
+<mapper namespace="com.li.stock.forecast.ForecastMapper">
+
+    <select id="latestAsofDate" resultType="java.time.LocalDate">
+        SELECT MAX(`asof_date`) FROM `prediction_run`
+        WHERE `horizon` = #{horizon}
+        <if test="modelId != null and modelId != ''">AND `model_id` = #{modelId}</if>
+    </select>
+
+    <select id="countSelected" resultType="long">
+        SELECT COUNT(*) FROM `stock_prediction`
+        WHERE `asof_date` = #{asof} AND `horizon` = #{horizon}
+          AND `model_id` = #{modelId} AND `is_selected` = 1
+    </select>
+
+    <select id="countPredictions" resultType="long">
+        SELECT COUNT(*) FROM `stock_prediction`
+        WHERE `asof_date` = #{asof} AND `horizon` = #{horizon} AND `model_id` = #{modelId}
+    </select>
+
+    <select id="overviewStats" resultType="com.li.stock.forecast.ForecastRepository$ForecastOverviewStats">
+        SELECT
+            (SELECT COUNT(*) FROM `model_registry` WHERE `horizon` = #{horizon}) AS `modelTotal`,
+            (SELECT COUNT(*) FROM `model_registry` WHERE `horizon` = #{horizon} AND `status` = 'champion') AS `championCount`,
+            (SELECT COUNT(*) FROM `model_registry` WHERE `horizon` = #{horizon} AND `status` = 'candidate') AS `candidateCount`,
+            (SELECT COUNT(*) FROM `model_registry` WHERE `horizon` = #{horizon} AND `status` = 'retired') AS `retiredCount`,
+            (SELECT AVG(t.`rank_ic`) FROM (
+                SELECT e.`rank_ic`,
+                       ROW_NUMBER() OVER (PARTITION BY e.`model_id` ORDER BY e.`asof_date` DESC) AS rn
+                FROM `model_eval` e
+                JOIN `model_registry` r ON r.`model_id` = e.`model_id`
+                WHERE e.`horizon` = #{horizon} AND r.`status` IN ('champion','candidate')
+            ) t WHERE t.`rn` &lt;= 60) AS `avgRankIc60`
+    </select>
+
+    <select id="models" resultType="com.li.stock.forecast.ForecastModelVO">
+        SELECT r.`model_id` AS `modelId`, r.`model_type` AS `modelType`, r.`horizon` AS `horizon`,
+               r.`label_def` AS `labelDef`, r.`feature_version` AS `featureVersion`,
+               r.`train_start` AS `trainStart`, r.`train_end` AS `trainEnd`,
+               r.`status` AS `status`, r.`note` AS `note`, r.`created_at` AS `createdAt`,
+               s.`avgRankIc60` AS `avgRankIc60`, s.`icir60` AS `icir60`,
+               s.`avgTopnExcess` AS `avgTopnExcess`, s.`evalCount` AS `evalCount`
+        FROM `model_registry` r
+        LEFT JOIN (
+            SELECT `model_id`, AVG(`rank_ic`) AS `avgRankIc60`,
+                   AVG(`rank_ic`) / NULLIF(STDDEV_SAMP(`rank_ic`), 0) AS `icir60`,
+                   AVG(`topn_avg_excess`) AS `avgTopnExcess`, COUNT(*) AS `evalCount`
+            FROM (
+                SELECT `model_id`, `rank_ic`, `topn_avg_excess`,
+                       ROW_NUMBER() OVER (PARTITION BY `model_id` ORDER BY `asof_date` DESC) AS rn
+                FROM `model_eval` WHERE `horizon` = #{horizon}
+            ) t WHERE t.`rn` &lt;= 60
+            GROUP BY `model_id`
+        ) s ON s.`model_id` = r.`model_id`
+        WHERE r.`horizon` = #{horizon}
+        ORDER BY FIELD(r.`status`, 'champion', 'candidate', 'retired'), s.`icir60` DESC
+    </select>
+
+    <select id="picks" resultType="com.li.stock.forecast.ForecastPickVO">
+        SELECT p.`code` AS `code`, p.`market` AS `market`,
+               i.`name` AS `name`, i.`industry` AS `industry`,
+               p.`prob_up` AS `probUp`, p.`pred_ret` AS `predRet`,
+               p.`pred_q10` AS `predQ10`, p.`pred_q90` AS `predQ90`,
+               p.`score` AS `score`, p.`rank_all` AS `rankAll`,
+               (o.`code` IS NOT NULL) AS `outcomeFilled`,
+               o.`entry_tradable` AS `entryTradable`,
+               o.`real_ret` AS `realRet`, o.`excess_ret` AS `excessRet`
+        FROM `stock_prediction` p
+        LEFT JOIN `stock_info` i ON i.`code` = p.`code`
+        LEFT JOIN `prediction_outcome` o
+               ON o.`code` = p.`code` AND o.`market` = p.`market`
+              AND o.`asof_date` = p.`asof_date` AND o.`horizon` = #{horizon}
+        WHERE p.`asof_date` = #{asof} AND p.`horizon` = #{horizon}
+          AND p.`model_id` = #{modelId} AND p.`is_selected` = 1
+        ORDER BY p.`rank_all` ASC
+        LIMIT #{limit}
+    </select>
+
+    <select id="predictions" resultType="com.li.stock.forecast.ForecastPredictionVO">
+        SELECT p.`code` AS `code`, p.`market` AS `market`, i.`name` AS `name`,
+               p.`prob_up` AS `probUp`, p.`pred_ret` AS `predRet`,
+               p.`score` AS `score`, p.`rank_all` AS `rankAll`, p.`is_selected` AS `isSelected`
+        FROM `stock_prediction` p
+        LEFT JOIN `stock_info` i ON i.`code` = p.`code`
+        WHERE p.`asof_date` = #{asof} AND p.`horizon` = #{horizon} AND p.`model_id` = #{modelId}
+        ORDER BY p.`rank_all` ASC
+        LIMIT #{limit} OFFSET #{offset}
+    </select>
+
+    <select id="eval" resultType="com.li.stock.forecast.ForecastEvalVO">
+        SELECT `model_id` AS `modelId`, `asof_date` AS `asofDate`, `horizon` AS `horizon`,
+               `n_samples` AS `nSamples`, `ic` AS `ic`, `rank_ic` AS `rankIc`,
+               `auc` AS `auc`, `brier` AS `brier`,
+               `topn_hit_rate` AS `topnHitRate`, `topn_avg_ret` AS `topnAvgRet`,
+               `topn_avg_excess` AS `topnAvgExcess`, `all_avg_ret` AS `allAvgRet`,
+               `decile_spread` AS `decileSpread`
+        FROM `model_eval`
+        WHERE `horizon` = #{horizon}
+        <if test="modelId != null and modelId != ''">AND `model_id` = #{modelId}</if>
+        ORDER BY `asof_date` DESC, `model_id` ASC
+        LIMIT #{limit}
+    </select>
+
+    <select id="latestWeights" resultType="com.li.stock.forecast.ForecastWeightVO">
+        SELECT w.`asof_date` AS `asofDate`, w.`horizon` AS `horizon`,
+               w.`model_id` AS `modelId`, w.`weight` AS `weight`, w.`icir_60` AS `icir60`
+        FROM `model_weight` w
+        JOIN (SELECT MAX(`asof_date`) AS d FROM `model_weight` WHERE `horizon` = #{horizon}) t
+          ON w.`asof_date` = t.d
+        WHERE w.`horizon` = #{horizon}
+        ORDER BY w.`weight` DESC
+    </select>
+
+    <select id="asofDates" resultType="java.time.LocalDate">
+        SELECT DISTINCT `asof_date` FROM `prediction_run`
+        ORDER BY `asof_date` DESC LIMIT #{limit}
+    </select>
+</mapper>

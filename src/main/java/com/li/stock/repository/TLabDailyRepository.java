@@ -1,4 +1,4 @@
-package com.li.stock.tlab.repo;
+package com.li.stock.repository;
 
 import com.li.stock.domain.Bar;
 import org.springframework.jdbc.core.JdbcTemplate;

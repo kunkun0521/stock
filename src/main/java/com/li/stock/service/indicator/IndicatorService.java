@@ -1,4 +1,4 @@
-package com.li.stock.tlab.indicator;
+package com.li.stock.service.indicator;
 
 import com.li.stock.domain.Bar;
 import com.li.stock.domain.Indicator;

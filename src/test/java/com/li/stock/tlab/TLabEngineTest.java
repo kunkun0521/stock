@@ -14,7 +14,7 @@ import com.li.stock.tlab.engine.ExecutionSimulator;
 import com.li.stock.tlab.engine.FeeCalculator;
 import com.li.stock.tlab.engine.StrategyEngine;
 import com.li.stock.tlab.engine.StrategyPlan;
-import com.li.stock.tlab.indicator.IndicatorService;
+import com.li.stock.service.indicator.IndicatorService;
 import org.junit.jupiter.api.Test;
 
 import java.time.LocalDate;

@@ -1,4 +1,4 @@
-package com.li.stock.tlab.web;
+package com.li.stock.service;
 
 import com.li.stock.common.BizException;
 import com.li.stock.domain.Bar;
@@ -18,9 +18,9 @@ import com.li.stock.tlab.engine.Backtester;
 import com.li.stock.tlab.engine.EntryScanner;
 import com.li.stock.tlab.engine.FeeCalculator;
 import com.li.stock.tlab.engine.NextDayPlanner;
-import com.li.stock.tlab.indicator.IndicatorService;
-import com.li.stock.tlab.repo.TLabDailyRepository;
-import com.li.stock.tlab.repo.TLabTaskRepository;
+import com.li.stock.service.indicator.IndicatorService;
+import com.li.stock.repository.TLabDailyRepository;
+import com.li.stock.repository.TLabTaskRepository;
 import org.springframework.stereotype.Service;
 
 import java.math.BigDecimal;

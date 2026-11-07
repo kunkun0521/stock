@@ -1,4 +1,4 @@
-package com.li.stock.tlab.web;
+package com.li.stock.controller;
 
 import com.li.stock.common.ApiResponse;
 import com.li.stock.domain.vo.ParamItemVO;
@@ -8,6 +8,7 @@ import com.li.stock.domain.vo.ScanRequest;
 import com.li.stock.domain.vo.ScanResultVO;
 import com.li.stock.domain.vo.SimulateRequest;
 import com.li.stock.domain.vo.SimulateResultVO;
+import com.li.stock.service.TLabService;
 import org.springframework.web.bind.annotation.GetMapping;
 import org.springframework.web.bind.annotation.PathVariable;
 import org.springframework.web.bind.annotation.PostMapping;

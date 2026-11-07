@@ -1,4 +1,4 @@
-package com.li.stock.forecast;
+package com.li.stock.domain.vo;
 
 import java.math.BigDecimal;
 

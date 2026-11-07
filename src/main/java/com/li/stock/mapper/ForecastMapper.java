@@ -1,5 +1,7 @@
-package com.li.stock.forecast;
+package com.li.stock.mapper;
 
+import com.li.stock.domain.vo.*;
+import com.li.stock.repository.ForecastRepository;
 import org.apache.ibatis.annotations.Mapper;
 import org.apache.ibatis.annotations.Param;
 

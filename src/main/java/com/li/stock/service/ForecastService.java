@@ -1,7 +1,9 @@
-package com.li.stock.forecast;
+package com.li.stock.service;
 
 import com.li.stock.common.PageResult;
 import com.li.stock.common.QuerySupport;
+import com.li.stock.domain.vo.*;
+import com.li.stock.repository.ForecastRepository;
 import org.springframework.stereotype.Service;
 
 import java.time.LocalDate;

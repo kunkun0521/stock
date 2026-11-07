@@ -7,7 +7,7 @@ import org.springframework.scheduling.annotation.EnableScheduling;
 
 @EnableScheduling
 @SpringBootApplication
-@MapperScan("com.li.stock.mapper")
+@MapperScan({"com.li.stock.mapper", "com.li.stock.forecast"})
 public class StockApplication {
 
     public static void main(String[] args) {

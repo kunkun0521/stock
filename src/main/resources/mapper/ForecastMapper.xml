@@ -1,6 +1,6 @@
 <?xml version="1.0" encoding="UTF-8" ?>
 <!DOCTYPE mapper PUBLIC "-//mybatis.org//DTD Mapper 3.0//EN" "https://mybatis.org/dtd/mybatis-3-mapper.dtd">
-<mapper namespace="com.li.stock.forecast.ForecastMapper">
+<mapper namespace="com.li.stock.mapper.ForecastMapper">
 
     <select id="latestAsofDate" resultType="java.time.LocalDate">
         SELECT MAX(`asof_date`) FROM `prediction_run`
@@ -19,7 +19,7 @@
         WHERE `asof_date` = #{asof} AND `horizon` = #{horizon} AND `model_id` = #{modelId}
     </select>
 
-    <select id="overviewStats" resultType="com.li.stock.forecast.ForecastRepository$ForecastOverviewStats">
+    <select id="overviewStats" resultType="com.li.stock.repository.ForecastRepository$ForecastOverviewStats">
         SELECT
             (SELECT COUNT(*) FROM `model_registry` WHERE `horizon` = #{horizon}) AS `modelTotal`,
             (SELECT COUNT(*) FROM `model_registry` WHERE `horizon` = #{horizon} AND `status` = 'champion') AS `championCount`,
@@ -34,7 +34,7 @@
             ) t WHERE t.`rn` &lt;= 60) AS `avgRankIc60`
     </select>
 
-    <select id="models" resultType="com.li.stock.forecast.ForecastModelVO">
+    <select id="models" resultType="com.li.stock.domain.vo.ForecastModelVO">
         SELECT r.`model_id` AS `modelId`, r.`model_type` AS `modelType`, r.`horizon` AS `horizon`,
                r.`label_def` AS `labelDef`, r.`feature_version` AS `featureVersion`,
                r.`train_start` AS `trainStart`, r.`train_end` AS `trainEnd`,
@@ -57,7 +57,7 @@
         ORDER BY FIELD(r.`status`, 'champion', 'candidate', 'retired'), s.`icir60` DESC
     </select>
 
-    <select id="picks" resultType="com.li.stock.forecast.ForecastPickVO">
+    <select id="picks" resultType="com.li.stock.domain.vo.ForecastPickVO">
         SELECT p.`code` AS `code`, p.`market` AS `market`,
                i.`name` AS `name`, i.`industry` AS `industry`,
                p.`prob_up` AS `probUp`, p.`pred_ret` AS `predRet`,
@@ -77,7 +77,7 @@
         LIMIT #{limit}
     </select>
 
-    <select id="predictions" resultType="com.li.stock.forecast.ForecastPredictionVO">
+    <select id="predictions" resultType="com.li.stock.domain.vo.ForecastPredictionVO">
         SELECT p.`code` AS `code`, p.`market` AS `market`, i.`name` AS `name`,
                p.`prob_up` AS `probUp`, p.`pred_ret` AS `predRet`,
                p.`score` AS `score`, p.`rank_all` AS `rankAll`, p.`is_selected` AS `isSelected`
@@ -88,7 +88,7 @@
         LIMIT #{limit} OFFSET #{offset}
     </select>
 
-    <select id="eval" resultType="com.li.stock.forecast.ForecastEvalVO">
+    <select id="eval" resultType="com.li.stock.domain.vo.ForecastEvalVO">
         SELECT `model_id` AS `modelId`, `asof_date` AS `asofDate`, `horizon` AS `horizon`,
                `n_samples` AS `nSamples`, `ic` AS `ic`, `rank_ic` AS `rankIc`,
                `auc` AS `auc`, `brier` AS `brier`,
@@ -102,7 +102,7 @@
         LIMIT #{limit}
     </select>
 
-    <select id="latestWeights" resultType="com.li.stock.forecast.ForecastWeightVO">
+    <select id="latestWeights" resultType="com.li.stock.domain.vo.ForecastWeightVO">
         SELECT w.`asof_date` AS `asofDate`, w.`horizon` AS `horizon`,
                w.`model_id` AS `modelId`, w.`weight` AS `weight`, w.`icir_60` AS `icir60`
         FROM `model_weight` w

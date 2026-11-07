@@ -1,7 +1,9 @@
-package com.li.stock.forecast;
+package com.li.stock.controller;
 
 import com.li.stock.common.ApiResponse;
 import com.li.stock.common.PageResult;
+import com.li.stock.domain.vo.*;
+import com.li.stock.service.ForecastService;
 import org.springframework.format.annotation.DateTimeFormat;
 import org.springframework.web.bind.annotation.GetMapping;
 import org.springframework.web.bind.annotation.RequestMapping;

@@ -1,5 +1,7 @@
-package com.li.stock.forecast;
+package com.li.stock.repository;
 
+import com.li.stock.domain.vo.*;
+import com.li.stock.mapper.ForecastMapper;
 import org.springframework.stereotype.Repository;
 
 import java.math.BigDecimal;

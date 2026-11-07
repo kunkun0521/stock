@@ -40,11 +40,13 @@ mybatis:
 
 # 每日定时日线抓取：00 前缀 17:00、60 前缀 18:50、30 前缀 20:20，
 # 每次保证覆盖近 500 个交易日（730 个自然日），复权口径为前复权 + 不复权。
+# catch-up-on-startup：启动时对今日计划时间已过的前缀自动补跑，防止应用没开/电脑睡眠错过执行。
 stock:
   scheduled-crawl:
-    enabled: true
+    enabled: false
     days-back: 730
     delay-millis: 1500
+    catch-up-on-startup: true
     cron-00: "0 0 17 * * ?"
     cron-60: "0 50 18 * * ?"
     cron-30: "0 20 20 * * ?"

@@ -1,0 +1,26 @@
+<?xml version="1.0" encoding="UTF-8" ?>
+<!DOCTYPE mapper PUBLIC "-//mybatis.org//DTD Mapper 3.0//EN" "https://mybatis.org/dtd/mybatis-3-mapper.dtd">
+<mapper namespace="com.li.stock.mapper.ScoreContinuityMapper">
+    <select id="availableDates" resultType="java.time.LocalDate">
+        SELECT DISTINCT `trade_date`
+        FROM `stock_score_daily`
+        WHERE `adjustflag` = #{adjustFlag}
+        <if test="asOfDate != null">AND `trade_date` &lt;= #{asOfDate}</if>
+        ORDER BY `trade_date` DESC
+        LIMIT #{limit}
+    </select>
+
+    <select id="loadScores" resultType="com.li.stock.domain.model.ScoreDailyPoint">
+        SELECT s.`code`, s.`market`, s.`trade_date` AS `tradeDate`, s.`total_score` AS `totalScore`,
+               i.`name`, i.`exchange`, i.`board`, i.`industry`, s.`close`
+        FROM `stock_score_daily` s
+        LEFT JOIN `stock_info` i ON i.`code` = s.`code` AND i.`exchange` = s.`market`
+        WHERE s.`adjustflag` = #{adjustFlag}
+          AND s.`trade_date` BETWEEN #{fromDate} AND #{toDate}
+          AND s.`total_score` IS NOT NULL
+        <if test="keyword != null and keyword != ''">
+            AND (s.`code` LIKE CONCAT('%', #{keyword}, '%') OR i.`name` LIKE CONCAT('%', #{keyword}, '%'))
+        </if>
+        ORDER BY s.`code`, s.`market`, s.`trade_date`
+    </select>
+</mapper>

@@ -1,0 +1,10 @@
+<?xml version="1.0" encoding="UTF-8" ?>
+<!DOCTYPE mapper PUBLIC "-//mybatis.org//DTD Mapper 3.0//EN" "https://mybatis.org/dtd/mybatis-3-mapper.dtd">
+<mapper namespace="com.li.stock.mapper.ScoreScheduleMapper">
+    <!-- 统一入口 stock_daily_all 是三张分表的 UNION ALL 视图；DISTINCT 后取倒序前 N 个交易日。 -->
+    <select id="recentTradeDates" resultType="java.time.LocalDate">
+        SELECT DISTINCT `trade_date` FROM `stock_daily_all`
+        WHERE `adjustflag` = #{adjustFlag}
+        ORDER BY `trade_date` DESC LIMIT #{limit}
+    </select>
+</mapper>

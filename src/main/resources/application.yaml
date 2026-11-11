@@ -50,3 +50,15 @@ stock:
     cron-00: "0 0 17 * * ?"
     cron-60: "0 50 18 * * ?"
     cron-30: "0 20 20 * * ?"
+
+  # 量化评分自动计算：启动后异步重算最近 10 个交易日；每日 21:30（晚于日线抓取）重算最新交易日。
+  # 复用页面「实时计算评分」的算法，写入为 ON DUPLICATE KEY UPDATE，重算幂等；手动接口不受影响。
+  # 单次重算约 30 秒，启动补跑 10 天约 5 分钟，全部在后台守护线程执行，不阻塞接口。
+  score-schedule:
+    enabled: true
+    adjust-flag: 2
+    startup-enabled: true
+    startup-days: 10
+    startup-delay-millis: 3000
+    daily-days: 1
+    cron: "0 30 21 * * ?"

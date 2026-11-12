@@ -62,3 +62,10 @@ stock:
     startup-delay-millis: 3000
     daily-days: 1
     cron: "0 30 21 * * ?"
+
+  # 遗传算法涨跌预测（ga 包）：14 张 ga_ 表由 GaSchemaInitializer 幂等创建，
+  # 参数全部来自 ga_config；关闭 enabled 只停定时触发，看板手动触发仍可用。
+  ga:
+    enabled: true
+    cron-daily: "0 30 17 * * ?"
+    cron-evolve: "0 0 2 ? * SAT"

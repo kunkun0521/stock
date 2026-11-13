@@ -246,6 +246,14 @@ public class GaDataRepository {
         return n == null ? 0 : n;
     }
 
+    /** 已落库特征覆盖的交易日数量：用于判断首次运行是否需要回填历史。 */
+    public int countFeatureDays(int flag) {
+        Integer n = jdbc.queryForObject(
+                "SELECT COUNT(DISTINCT `trade_date`) FROM `stock_feature_daily` WHERE `adjustflag`=?",
+                Integer.class, flag);
+        return n == null ? 0 : n;
+    }
+
     /** 某日某特征原始值截面，用于因子 IC 体检。 */
     public Map<String, double[]> featureCrossSection(LocalDate date, int flag, Set<String> keys) {
         if (keys.isEmpty()) return Map.of();

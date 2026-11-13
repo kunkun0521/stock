@@ -81,7 +81,9 @@ public class ChampionService {
             int active = Math.max(1, ind.active());
             double s = ind.b;
             for (int j = 0; j < ind.w.length; j++) if (ind.m[j] == 1) {
-                double term = ind.w[j] * z[j];
+                // 缺失特征在标准化后可能仍是 NaN，按 0（截面均值）处理，避免整行预测变成 NaN
+                double zj = Double.isFinite(z[j]) ? z[j] : 0.0;
+                double term = ind.w[j] * zj;
                 s += term / Math.sqrt(active);
                 contrib[j] += c.weight() * term / Math.sqrt(active);
             }

@@ -95,7 +95,9 @@ public class GaQueryService {
         List<String> check(LocalDate today) {
             List<String> out = new ArrayList<>();
             int flag = config.globalInt("adjust_flag");
-            if (data.countFeatureDate(today, flag) == 0) {
+            // 以行情库最新交易日为基准，而不是日历今天（收盘前/非交易日今天尚无行情属正常）
+            LocalDate latest = data.latestDate(flag);
+            if (latest != null && data.countFeatureDate(latest, flag) == 0) {
                 out.add("最新交易日尚无特征缓存，看板数据可能滞后，请运行 FeatureJob");
             }
             return out;
@@ -134,11 +136,9 @@ public class GaQueryService {
     }
 
     public Map<String, Object> trend(Integer horizon, int window, LocalDate from, LocalDate to) {
-        List<Map<String, Object>> rows = jdbc.queryForList("SELECT DATE_FORMAT(`as_of_date`,'%Y-%m-%d') d, "
-                + "`horizon`, `hit_rate` FROM `ga_metric_daily` WHERE `scope_type`='ALL' "
-                + "AND `window_days`=? AND `is_replay`=0 AND `as_of_date` BETWEEN ? AND ? "
-                + "AND (`horizon`=? OR ?=0) ORDER BY `as_of_date`",
-                window, Date.valueOf(from), Date.valueOf(to), horizon == null ? 0 : horizon, horizon == null ? 0 : horizon);
+        List<Map<String, Object>> rows = trendRows(horizon, window, from, to, 0);
+        // 新上线系统还没有实盘指标时，退回展示回放指标，避免图表空白
+        if (rows.isEmpty()) rows = trendRows(horizon, window, from, to, 1);
         List<String> dates = rows.stream().map(r -> String.valueOf(r.get("d"))).distinct().toList();
         Map<Integer, Map<String, Double>> byH = new LinkedHashMap<>();
         for (Map<String, Object> r : rows) {
@@ -152,15 +152,32 @@ public class GaQueryService {
         return Map.of("dates", dates, "series", series);
     }
 
+    private List<Map<String, Object>> trendRows(Integer horizon, int window, LocalDate from,
+                                                LocalDate to, int replay) {
+        return jdbc.queryForList("SELECT DATE_FORMAT(`as_of_date`,'%Y-%m-%d') d, "
+                        + "`horizon`, `hit_rate` FROM `ga_metric_daily` WHERE `scope_type`='ALL' "
+                        + "AND `window_days`=? AND `is_replay`=? AND `as_of_date` BETWEEN ? AND ? "
+                        + "AND (`horizon`=? OR ?=0) ORDER BY `as_of_date`",
+                window, replay, Date.valueOf(from), Date.valueOf(to),
+                horizon == null ? 0 : horizon, horizon == null ? 0 : horizon);
+    }
+
     public List<Map<String, Object>> calendar(Integer horizon, String month) {
         LocalDate from = LocalDate.parse((month == null || month.isBlank()
                 ? LocalDate.now().withDayOfMonth(1).toString() : month).substring(0, 7) + "-01");
         LocalDate to = from.withDayOfMonth(from.lengthOfMonth());
+        List<Map<String, Object>> rows = calendarRows(horizon, from, to, 0);
+        if (rows.isEmpty()) rows = calendarRows(horizon, from, to, 1);
+        return rows;
+    }
+
+    private List<Map<String, Object>> calendarRows(Integer horizon, LocalDate from, LocalDate to,
+                                                   int replay) {
         return jdbc.queryForList("SELECT DATE_FORMAT(`as_of_date`,'%Y-%m-%d') `date`, "
                         + "`hit_rate` `hitRate`, `n_verified` n FROM `ga_metric_daily` "
-                        + "WHERE `scope_type`='ALL' AND `window_days`=1 AND `is_replay`=0 "
+                        + "WHERE `scope_type`='ALL' AND `window_days`=1 AND `is_replay`=? "
                         + "AND (`horizon`=? OR ?=0) AND `as_of_date` BETWEEN ? AND ? ORDER BY `as_of_date`",
-                horizon == null ? 0 : horizon, horizon == null ? 0 : horizon,
+                replay, horizon == null ? 0 : horizon, horizon == null ? 0 : horizon,
                 Date.valueOf(from), Date.valueOf(to));
     }
 

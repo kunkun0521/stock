@@ -59,3 +59,55 @@ created_at      datetime default CURRENT_TIMESTAMP not null comment '创建时�
 updated_at      datetime default CURRENT_TIMESTAMP not null on update CURRENT_TIMESTAMP comment '更新时间',
 primary key (code, market, trade_date, adjustflag)
 );
+---
+
+## 6. GA 遗传算法预测接口（`/api/ga`）
+
+完整公式与使用说明见 **`docs/功能与公式说明.md` 第 9 章**；此处只列接口。
+
+### 6.1 看板查询（只读）
+
+| 方法 | 路径 | 主要参数 | 说明 |
+| --- | --- | --- | --- |
+| GET | `/overview` | horizon, from, to, board, strict, includeReplay | 总览 KPI：命中率、样本数、置信度 |
+| GET | `/overview/trend` | horizon, window, from, to | 逐日命中率趋势 |
+| GET | `/overview/calendar` | horizon, month | 月度日历热力 |
+| GET | `/predictions` | from, to, board, inPool, sort, page, size | 预测明细 + 摘要 |
+| GET | `/predictions/export` | 同上 | CSV 导出（UTF-8 BOM） |
+| GET | `/stock/{market}/{code}` | horizon, from, to | 个股预测历史 |
+| GET | `/analysis/buckets` | horizon, dim(vol/conf/score), from, to | 分桶准确率 |
+| GET | `/analysis/reliability` | horizon, from, to | 可靠性曲线 |
+| GET | `/analysis/confusion` | horizon, from, to | 混淆矩阵 |
+| GET | `/analysis/top-errors` | horizon, topN | 最大错误 Top |
+| GET | `/analysis/quantile` | horizon, from, to | 分位数收益表 |
+| GET | `/pool` | status, reason, page, size | 股票池列表 |
+| GET | `/pool/log` | code, market, from, to | 淘汰/复活日志 |
+| GET | `/evolution/runs` | horizon, page, size | 进化批次 |
+| GET | `/evolution/runs/{id}/generations` | — | 逐代统计 |
+| GET | `/individuals` | horizon | 个体列表（染色体 JSON） |
+| GET | `/champions` | horizon | 冠军集版本与成员 |
+| GET | `/factors/ic` | horizon, days | 因子 IC 体检 |
+| GET | `/picks` | date, topN, direction(1/-1), minConsensus | 多周期共识选股 |
+| GET | `/config` | scope | 配置项（不传或空串=全部作用域） |
+| GET | `/jobs/status` | — | 任务状态与最近结果（含 running 排队标记） |
+| GET | `/jobs/log` | limit(默认 30，最大 200) | 最近任务执行日志（含真实 startedAt/finishedAt） |
+| GET | `/jobs/schedule` | — | 定时调度：cron、下次触发时间、配置总开关与运行时开关、服务器时间 |
+
+### 6.2 写操作
+
+| 方法 | 路径 | 说明 |
+| --- | --- | --- |
+| PUT | `/config` | 热更新配置 `{scope,paramKey,paramValue}`；跨域直连需后端放行 PUT（已配置） |
+| POST | `/jobs/run` | 触发任务 `{job}`；job 取 `FeatureJob/PredictJob/VerifyJob/MetricJob/PoolJob/EvolveJob/CalibrateJob/FactorIcJob/ReplayJob/DailyPipeline/WeeklyEvolve` |
+| POST | `/jobs/schedule/toggle` | 切换定时触发运行时开关 `{enabled}`，只影响 @Scheduled，不影响手动运行 |
+| POST | `/jobs/schedule/fire` | 按定时规则立即执行一次 `{kind:daily\|weekly}`，与 @Scheduled 同一提交路径 |
+| POST | `/pool/override` | 手工淘汰/复活/白名单 `{code,market,action,remark}`（remark 必填） |
+| POST | `/evolution/run?horizon=` | 手动触发进化（不传 horizon 跑全部周期） |
+| POST | `/evolution/replay` | 历史回放 `{from,to,step,horizons}` |
+| POST | `/champions/promote?runId=&horizon=` | 指定 run 晋升冠军集 |
+| POST | `/champions/rollback` | 回滚 `{horizon,versionTag}` |
+
+### 6.3 使用顺序（首次）
+
+`FeatureJob`（自动回填全历史特征）→ `EvolveJob` → `PredictJob` → `PoolJob` → 到期后 `VerifyJob` → `MetricJob`。
+复盘数据需跑 `/evolution/replay` 生成历史预测并回填。

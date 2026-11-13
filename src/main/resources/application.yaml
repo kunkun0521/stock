@@ -8,7 +8,7 @@ spring:
   application:
     name: stock
   datasource:
-    url: jdbc:mysql://localhost:3306/stock_eastmoney?useUnicode=true&characterEncoding=utf-8&serverTimezone=Asia/Shanghai&useSSL=false&allowPublicKeyRetrieval=true
+    url: jdbc:mysql://localhost:3306/stock_eastmoney?useUnicode=true&characterEncoding=utf-8&serverTimezone=Asia/Shanghai&useSSL=false&allowPublicKeyRetrieval=true&rewriteBatchedStatements=true&cachePrepStmts=true&useServerPrepStmts=false
     username: root
     password: 123456
     driver-class-name: com.mysql.cj.jdbc.Driver

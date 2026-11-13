@@ -7,10 +7,12 @@ import com.li.stock.ga.metric.GaQueryService;
 import com.li.stock.ga.pool.PoolService;
 import com.li.stock.ga.predict.ChampionService;
 import com.li.stock.ga.repository.GaStoreRepository;
+import org.springframework.beans.factory.annotation.Value;
 import org.springframework.http.HttpHeaders;
 import org.springframework.http.HttpStatus;
 import org.springframework.http.MediaType;
 import org.springframework.http.ResponseEntity;
+import org.springframework.scheduling.support.CronExpression;
 import org.springframework.web.bind.annotation.GetMapping;
 import org.springframework.web.bind.annotation.PathVariable;
 import org.springframework.web.bind.annotation.PostMapping;
@@ -22,6 +24,10 @@ import org.springframework.web.bind.annotation.RestController;
 
 import java.nio.charset.StandardCharsets;
 import java.time.LocalDate;
+import java.time.LocalDateTime;
+import java.time.ZoneId;
+import java.time.ZonedDateTime;
+import java.time.format.DateTimeFormatter;
 import java.util.ArrayList;
 import java.util.LinkedHashMap;
 import java.util.List;
@@ -49,6 +55,13 @@ public class GaController {
     private final GaJobRunner jobs;
     private final ChampionService champions;
     private final PoolService pool;
+
+    @Value("${stock.ga.cron-daily:0 30 17 * * ?}")
+    private String cronDaily;
+    @Value("${stock.ga.cron-evolve:0 0 2 ? * SAT}")
+    private String cronEvolve;
+
+    private static final DateTimeFormatter TIME_FMT = DateTimeFormatter.ofPattern("yyyy-MM-dd HH:mm:ss");
 
     public GaController(GaQueryService query, GaStoreRepository store, GaConfig config,
                         GaJobRunner jobs, ChampionService champions, PoolService pool) {
@@ -387,6 +400,79 @@ public class GaController {
             return ApiResponse.ok(jobs.submit(name));
         } catch (Exception e) {
             return failed(e.getMessage());
+        }
+    }
+
+    /** 最近 N 条任务执行日志，供「后台任务」页验证触发是否生效。 */
+    @GetMapping("/jobs/log")
+    public ApiResponse<List<Map<String, Object>>> jobsLog(@RequestParam(required = false, defaultValue = "30") Integer limit) {
+        return ApiResponse.ok(store.recentJobLogs(limit == null ? 30 : limit));
+    }
+
+    /** 定时调度状态：cron、下次触发时间、配置文件总开关与看板运行时开关。 */
+    @GetMapping("/jobs/schedule")
+    public ApiResponse<Map<String, Object>> jobsSchedule() {
+        Map<String, Object> out = new LinkedHashMap<>();
+        out.put("configEnabled", jobs.isConfigEnabled());
+        out.put("runtimeEnabled", jobs.isRuntimeEnabled());
+        out.put("enabled", jobs.isScheduleEnabled());
+        out.put("cronDaily", cronDaily);
+        out.put("cronEvolve", cronEvolve);
+        out.put("nextDaily", nextFire(cronDaily));
+        out.put("nextEvolve", nextFire(cronEvolve));
+        out.put("dailyJob", "DailyPipeline");
+        out.put("weeklyJob", "WeeklyEvolve");
+        out.put("timezone", "Asia/Shanghai");
+        out.put("serverTime", LocalDateTime.now().format(TIME_FMT));
+        out.put("executor", "单线程串行队列");
+        return ApiResponse.ok(out);
+    }
+
+    /** 看板切换定时触发开关；不传 enabled 则取反。手动触发始终不受影响。 */
+    @PostMapping("/jobs/schedule/toggle")
+    public ApiResponse<Map<String, Object>> toggleSchedule(@RequestBody(required = false) Map<String, Object> body) {
+        try {
+            Object raw = (body == null ? Map.of() : body).get("enabled");
+            boolean value = raw == null ? !jobs.isRuntimeEnabled()
+                    : (raw instanceof Boolean b ? b : "1".equals(String.valueOf(raw))
+                    || "true".equalsIgnoreCase(String.valueOf(raw)));
+            boolean effective = jobs.setRuntimeEnabled(value);
+            Map<String, Object> out = new LinkedHashMap<>();
+            out.put("enabled", effective);
+            out.put("runtimeEnabled", jobs.isRuntimeEnabled());
+            out.put("configEnabled", jobs.isConfigEnabled());
+            out.put("message", effective ? "定时触发已启用" : "定时触发已停用（手动运行仍可用）");
+            return ApiResponse.ok(out);
+        } catch (Exception e) {
+            return failed(e.getMessage());
+        }
+    }
+
+    /** 按定时规则立即执行一次，走与 @Scheduled 完全相同的提交路径。 */
+    @PostMapping("/jobs/schedule/fire")
+    public ApiResponse<Map<String, Object>> fireSchedule(@RequestBody(required = false) Map<String, Object> body) {
+        try {
+            String kind = str((body == null ? Map.of() : body).get("kind"));
+            String message = jobs.fireScheduled(kind);
+            Map<String, Object> out = new LinkedHashMap<>();
+            out.put("kind", kind);
+            out.put("job", "weekly".equalsIgnoreCase(kind) ? "WeeklyEvolve" : "DailyPipeline");
+            out.put("message", message);
+            out.put("accepted", true);
+            return ApiResponse.ok(out);
+        } catch (Exception e) {
+            return failed(e.getMessage());
+        }
+    }
+
+    /** 计算 cron 的下一次触发时间；解析失败返回空串，不影响接口本身。 */
+    private static String nextFire(String cron) {
+        try {
+            ZonedDateTime now = ZonedDateTime.now(ZoneId.of("Asia/Shanghai"));
+            ZonedDateTime next = CronExpression.parse(cron).next(now);
+            return next == null ? "" : next.format(TIME_FMT);
+        } catch (Exception e) {
+            return "";
         }
     }
 

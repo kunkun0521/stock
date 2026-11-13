@@ -17,6 +17,7 @@ import org.springframework.scheduling.annotation.Scheduled;
 import org.springframework.stereotype.Service;
 
 import java.time.LocalDate;
+import java.time.LocalDateTime;
 import java.util.ArrayList;
 import java.util.LinkedHashMap;
 import java.util.List;
@@ -43,6 +44,9 @@ public class GaJobRunner {
 
     private static final Logger log = LoggerFactory.getLogger(GaJobRunner.class);
 
+    /** 进化所需的最少特征交易日数（规格要求训练窗口 T_min=150，这里留 10 天余量）。 */
+    private static final int MIN_FEATURE_DAYS = 160;
+
     /** 看板 jobs/status 列出的全部可执行任务，顺序即展示顺序。 */
     public static final List<String> JOB_NAMES = List.of(
             "FeatureJob", "PredictJob", "VerifyJob", "MetricJob", "PoolJob",
@@ -66,9 +70,15 @@ public class GaJobRunner {
     });
     private final Map<String, AtomicBoolean> running = new ConcurrentHashMap<>();
 
-    /** 总开关：false 时关闭所有定时触发，看板手动触发仍可用。 */
+    /** 配置文件总开关：false 时关闭所有定时触发，看板手动触发仍可用。 */
     @Value("${stock.ga.enabled:true}")
     private boolean enabled;
+
+    /**
+     * 运行时开关（看板可切换），null 表示跟随配置文件。
+     * 只影响 @Scheduled 触发，不影响手动「立即运行」与「模拟定时触发」。
+     */
+    private volatile Boolean runtimeEnabled;
 
     public GaJobRunner(GaConfig config, GaDataRepository data, GaStoreRepository store,
                        FeatureService features, PredictionService predictions, MetricService metrics,
@@ -89,8 +99,8 @@ public class GaJobRunner {
     /** 交易日 17:30（晚于日线抓取）执行完整日链路。 */
     @Scheduled(cron = "${stock.ga.cron-daily:0 30 17 * * ?}", zone = "Asia/Shanghai")
     public void scheduledDaily() {
-        if (!enabled) {
-            log.info("GA 定时任务已停用（stock.ga.enabled=false）");
+        if (!isScheduleEnabled()) {
+            log.info("GA 定时任务已停用（stock.ga.enabled=false 或看板开关关闭）");
             return;
         }
         submitInternal("DailyPipeline", true);
@@ -99,11 +109,43 @@ public class GaJobRunner {
     /** 每周六 02:00 依次进化 5 个周期，并做准入、校准与每周淘汰评估。 */
     @Scheduled(cron = "${stock.ga.cron-evolve:0 0 2 ? * SAT}", zone = "Asia/Shanghai")
     public void scheduledWeekly() {
-        if (!enabled) {
-            log.info("GA 定时任务已停用（stock.ga.enabled=false）");
+        if (!isScheduleEnabled()) {
+            log.info("GA 定时任务已停用（stock.ga.enabled=false 或看板开关关闭）");
             return;
         }
         submitInternal("WeeklyEvolve", true);
+    }
+
+    // ------------------------------------------------------------------ 定时开关 / 模拟触发
+
+    /** 配置文件与看板开关同时为开时才允许 @Scheduled 执行。 */
+    public boolean isScheduleEnabled() {
+        return enabled && !Boolean.FALSE.equals(runtimeEnabled);
+    }
+
+    public boolean isConfigEnabled() { return enabled; }
+
+    public boolean isRuntimeEnabled() { return !Boolean.FALSE.equals(runtimeEnabled); }
+
+    /** 看板切换定时触发；返回切换后的实际状态。 */
+    public boolean setRuntimeEnabled(boolean value) {
+        runtimeEnabled = value;
+        log.info("[GA] 看板定时开关 → {}（配置文件 stock.ga.enabled={}）", value, enabled);
+        return isScheduleEnabled();
+    }
+
+    /**
+     * 按定时规则立即跑一次（与 @Scheduled 完全相同的 submitInternal(..., true) 路径），
+     * 不受看板开关影响，方便验证「定时触发是否真的有效果」而无需等到 cron 时间点。
+     */
+    public String fireScheduled(String kind) {
+        if (!"daily".equalsIgnoreCase(kind) && !"weekly".equalsIgnoreCase(kind)) {
+            throw new IllegalArgumentException("kind 只能是 daily / weekly");
+        }
+        String job = "weekly".equalsIgnoreCase(kind) ? "WeeklyEvolve" : "DailyPipeline";
+        String message = submitInternal(job, true);
+        log.info("[GA] 模拟定时触发 {}：{}", job, message);
+        return message;
     }
 
     // ------------------------------------------------------------------ 看板状态 / 手动触发
@@ -154,13 +196,14 @@ public class GaJobRunner {
         }
         executor.submit(() -> {
             long begin = System.currentTimeMillis();
+            LocalDateTime startedAt = LocalDateTime.now();
             try {
                 String msg = task.call();
-                store.logJob(name, "SUCCESS", msg, 0);
+                store.logJob(name, "SUCCESS", msg, 0, startedAt);
                 log.info("[GA] {} 完成（{} ms）：{}", name, System.currentTimeMillis() - begin, brief(msg));
             } catch (Exception e) {
                 String err = e.getClass().getSimpleName() + ": " + e.getMessage();
-                try { store.logJob(name, "FAILED", err, 0); } catch (Exception ignored) {}
+                try { store.logJob(name, "FAILED", err, 0, startedAt); } catch (Exception ignored) {}
                 log.error("[GA] {} 失败（{} ms）：{}", name, System.currentTimeMillis() - begin, err, e);
             } finally {
                 lock.set(false);
@@ -216,11 +259,31 @@ public class GaJobRunner {
 
     private String feature(int flag, LocalDate day) {
         int marketRows = features.buildMarket(flag, day);
-        FeatureService.BuildResult built = features.build(flag, day, day);
+        FeatureService.BuildResult built = ensureFeatures(flag, day);
         List<String> issues = features.qualityCheck(flag, day);
         return String.format("市场环境 %d 行，特征写入 %d 行（跳过 %d / 共 %d）%s",
                 marketRows, built.written(), built.skipped(), built.total(),
                 issues.isEmpty() ? "" : "；质检告警：" + String.join(" / ", issues));
+    }
+
+    /**
+     * 确保特征表覆盖到训练所需的历史深度。
+     *
+     * <p>首次运行（或覆盖不足 {@link #MIN_FEATURE_DAYS} 个交易日）时回填全部历史：
+     * GA 的训练样本来自 stock_feature_daily，只算当天会让进化拿不到任何带标签样本。
+     * 覆盖足够后改为增量，只重算最近 7 个自然日（容错重跑）。</p>
+     */
+    private FeatureService.BuildResult ensureFeatures(int flag, LocalDate day) {
+        int haveDays = data.countFeatureDays(flag);
+        if (haveDays >= MIN_FEATURE_DAYS) {
+            return features.build(flag, day.minusDays(7), day);
+        }
+        LocalDate from = day.minusDays(1200); // 覆盖库内全部历史，warmStart 会再向前预热
+        log.info("[GA] 特征覆盖仅 {} 个交易日，回填历史：[{}, {}]", haveDays, from, day);
+        FeatureService.BuildResult built = features.build(flag, from, day);
+        log.info("[GA] 历史特征回填完成：写入 {} 行，覆盖 {} 个交易日",
+                built.written(), data.countFeatureDays(flag));
+        return built;
     }
 
     private String predict(int flag) {
@@ -252,6 +315,11 @@ public class GaJobRunner {
     /** 每周：5 个周期顺序进化 → 准入 → Platt 校准 → 因子体检 → 每周淘汰规则。 */
     private String weeklyEvolve(int flag, LocalDate today) {
         List<String> steps = new ArrayList<>();
+        if (data.countFeatureDays(flag) < MIN_FEATURE_DAYS) {
+            FeatureService.BuildResult built = ensureFeatures(flag, today);
+            steps.add(String.format("特征回填 %d 行 / %d 个交易日", built.written(),
+                    data.countFeatureDays(flag)));
+        }
         for (int h : config.horizons()) {
             GaEngine.EvolveResult r = engine.evolve(h, today, "EVOLVE", null, null, null);
             steps.add(String.format("H%d %s runId=%d F=%.4f%s", h, r.status(), r.runId(), r.bestFitness(),
@@ -266,6 +334,10 @@ public class GaJobRunner {
 
     private String evolveOne(int h) {
         LocalDate today = LocalDate.now();
+        int flag = config.globalInt("adjust_flag");
+        if (data.countFeatureDays(flag) < MIN_FEATURE_DAYS) {
+            ensureFeatures(flag, today);
+        }
         GaEngine.EvolveResult r = engine.evolve(h, today, "MANUAL", null, null, null);
         String base = String.format("H%d %s runId=%d 代数=%d F=%.4f%s", h, r.status(), r.runId(),
                 r.generations(), r.bestFitness(),
@@ -276,6 +348,14 @@ public class GaJobRunner {
 
     private String evolveAll(LocalDate today) {
         List<String> steps = new ArrayList<>();
+        int flag = config.globalInt("adjust_flag");
+        // 进化前先确保特征表有足够历史，避免「有效样本不足」直接失败
+        int haveDays = data.countFeatureDays(flag);
+        if (haveDays < MIN_FEATURE_DAYS) {
+            FeatureService.BuildResult built = ensureFeatures(flag, today);
+            steps.add(String.format("特征回填 %d 行 / %d 个交易日", built.written(),
+                    data.countFeatureDays(flag)));
+        }
         for (int h : config.horizons()) {
             GaEngine.EvolveResult r = engine.evolve(h, today, "EVOLVE", null, null, null);
             steps.add("H" + h + " " + r.status() + " runId=" + r.runId() + " F=" + String.format("%.4f", r.bestFitness()));

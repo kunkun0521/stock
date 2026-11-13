@@ -134,6 +134,7 @@ public class GaConfig {
         put("regime_specific", "0", "是否按市场状态训练三套冠军集（P1，默认关）");
         put("batch_size", "1000", "JDBC 批量写入每批条数");
         put("verify_batch_size", "5000", "回填每批条数");
+        put("verify_page_size", "20000", "回填游标分页每页条数");
     }
 
     public static Map<String, String> defaults() {

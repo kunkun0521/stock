@@ -35,26 +35,54 @@ public class MetricService {
     /** 汇总 ALL / 板块 / 市场状态 × 当日 / 近20 / 近60 个基准日 × 实盘 / 回放。 */
     public String rebuild(LocalDate asOf) {
         LocalDate from = asOf.minusDays(120);
-        List<Map<String, Object>> rows = store.allPredictionsForMetric(from, asOf, 400000);
         List<Object[]> args = new ArrayList<>();
         for (int h : config.horizons()) {
-            for (int window : new int[]{1, 20, 60}) {
-                for (int replay : new int[]{0, 1}) {
-                    List<Map<String, Object>> filtered = rows.stream()
-                            .filter(r -> intVal(r.get("horizon")) == h)
-                            .filter(r -> intVal(r.get("inPool")) == 1)
-                            .filter(r -> "CHAMPION".equals(String.valueOf(r.get("modelRole"))))
-                            .filter(r -> "VERIFIED".equals(String.valueOf(r.get("status"))))
-                            .filter(r -> intVal(r.get("isReplay")) == replay)
-                            .toList();
-                    Map<String, List<Map<String, Object>>> grouped = group(filtered);
-                    for (Map.Entry<String, List<Map<String, Object>>> e : grouped.entrySet()) {
-                        String[] parts = e.getKey().split("\\|");
-                        LocalDate day = LocalDate.parse(parts[0]);
+            for (int replay : new int[]{0, 1}) {
+                // 分段读取、增量合并日统计：内存只保留当天统计量，不再把几十万行明细同时放堆里
+                Map<String, Map<LocalDate, DayStat>> stats = new LinkedHashMap<>();
+                for (LocalDate s = from; !s.isAfter(asOf); s = s.plusDays(30)) {
+                    LocalDate e = s.plusDays(29).isAfter(asOf) ? asOf : s.plusDays(29);
+                    List<Map<String, Object>> chunk = store.allPredictionsForMetric(s, e, 400000);
+                    if (chunk.isEmpty()) continue;
+                    Map<String, Map<LocalDate, List<Map<String, Object>>>> bucket = new LinkedHashMap<>();
+                    for (Map<String, Object> r : chunk) {
+                        if (intVal(r.get("horizon")) != h) continue;
+                        if (intVal(r.get("inPool")) != 1) continue;
+                        if (!"CHAMPION".equals(String.valueOf(r.get("modelRole")))) continue;
+                        if (intVal(r.get("isReplay")) != replay) continue;
+                        LocalDate d = LocalDate.parse(String.valueOf(r.get("tradeDate")).substring(0, 10));
+                        String code = String.valueOf(r.get("code"));
+                        String board = code.length() >= 2 ? code.substring(0, 2) : "OTHER";
+                        String regime = String.valueOf(r.getOrDefault("regime", "2"));
+                        for (String scope : new String[]{"ALL|", "BOARD|" + board, "REGIME|" + regime}) {
+                            bucket.computeIfAbsent(scope, k -> new LinkedHashMap<>())
+                                    .computeIfAbsent(d, k -> new ArrayList<>()).add(r);
+                        }
+                    }
+                    bucket.forEach((scope, byDay) -> byDay.forEach((d, list) ->
+                            stats.computeIfAbsent(scope, k -> new java.util.TreeMap<>())
+                                    .merge(d, dayStat(list), DayStat::plus)));
+                }
+                if (stats.isEmpty()) continue;
+
+                for (Map.Entry<String, Map<LocalDate, DayStat>> e : stats.entrySet()) {
+                    String[] parts = e.getKey().split("\\|", -1);
+                    String scopeType = parts[0], scopeValue = parts[1];
+                    Map<LocalDate, DayStat> byDay = e.getValue();
+                    for (Map.Entry<LocalDate, DayStat> de : byDay.entrySet()) {
+                        LocalDate day = de.getKey();
                         if (day.isBefore(asOf.minusDays(90))) continue;
-                        List<Map<String, Object>> win = windowRows(rows, h, replay, day, window);
-                        String scopeType = parts[1], scopeValue = parts[2];
-                        args.add(metricRow(day, h, scopeType, scopeValue, window, replay, win));
+                        for (int window : new int[]{1, 20, 60}) {
+                            LocalDate winFrom = day.minusDays(Math.max(1, window * 2));
+                            DayStat agg = null;
+                            for (Map.Entry<LocalDate, DayStat> we : byDay.entrySet()) {
+                                LocalDate d = we.getKey();
+                                if (d.isBefore(winFrom) || d.isAfter(day)) continue;
+                                agg = agg == null ? we.getValue() : agg.plus(we.getValue());
+                            }
+                            if (agg == null) continue;
+                            args.add(agg.toRow(day, h, scopeType, scopeValue, window, replay));
+                        }
                     }
                 }
             }
@@ -63,45 +91,40 @@ public class MetricService {
         return "汇总 " + args.size() + " 行指标";
     }
 
-    private Map<String, List<Map<String, Object>>> group(List<Map<String, Object>> rows) {
-        Map<String, List<Map<String, Object>>> out = new LinkedHashMap<>();
-        for (Map<String, Object> r : rows) {
-            String day = String.valueOf(r.get("tradeDate")).substring(0, 10);
-            String code = String.valueOf(r.get("code"));
-            String board = code.length() >= 2 ? code.substring(0, 2) : "OTHER";
-            String regime = String.valueOf(r.getOrDefault("regime", "2"));
-            for (String[] scope : new String[][]{{"ALL", ""}, {"BOARD", board}, {"REGIME", regime}}) {
-                out.computeIfAbsent(day + "|" + scope[0] + "|" + scope[1], k -> new ArrayList<>()).add(r);
-            }
+    /** 单日单作用域统计。 */
+    private record DayStat(int nPred, int nVerified, int nCorrect, int upHit, int upN,
+                           int downHit, int downN, double sumUp, int cntUp, double sumDown,
+                           int cntDown, double ic, int icDays) {
+
+        DayStat plus(DayStat o) {
+            return new DayStat(nPred + o.nPred, nVerified + o.nVerified, nCorrect + o.nCorrect,
+                    upHit + o.upHit, upN + o.upN, downHit + o.downHit, downN + o.downN,
+                    sumUp + o.sumUp, cntUp + o.cntUp, sumDown + o.sumDown, cntDown + o.cntDown,
+                    ic + o.ic, icDays + o.icDays);
         }
-        return out;
+
+        Object[] toRow(LocalDate day, int h, String scopeType, String scopeValue,
+                       int window, int replay) {
+            double avgUp = cntUp == 0 ? 0 : sumUp / cntUp, avgDown = cntDown == 0 ? 0 : sumDown / cntDown;
+            return new Object[]{Date.valueOf(day), h, scopeType, scopeValue, window, replay,
+                    nPred, nVerified, nCorrect,
+                    GaMath.div(nCorrect, nVerified, 0), GaMath.div(upHit, upN, 0), GaMath.div(downHit, downN, 0),
+                    GaMath.div(nVerified, nPred, 0), icDays == 0 ? 0 : ic / icDays, avgUp, avgDown,
+                    avgUp - avgDown};
+        }
     }
 
-    private List<Map<String, Object>> windowRows(List<Map<String, Object>> all, int h, int replay,
-                                                 LocalDate day, int window) {
-        LocalDate from = day.minusDays(Math.max(1, window * 2));
-        return all.stream()
-                .filter(r -> intVal(r.get("horizon")) == h && intVal(r.get("isReplay")) == replay)
-                .filter(r -> intVal(r.get("inPool")) == 1)
-                .filter(r -> "CHAMPION".equals(String.valueOf(r.get("modelRole"))))
-                .filter(r -> "VERIFIED".equals(String.valueOf(r.get("status"))))
-                .filter(r -> {
-                    LocalDate d = LocalDate.parse(String.valueOf(r.get("tradeDate")).substring(0, 10));
-                    return !d.isAfter(day) && !d.isBefore(from);
-                }).toList();
-    }
-
-    private Object[] metricRow(LocalDate day, int h, String scopeType, String scopeValue,
-                               int window, int replay, List<Map<String, Object>> rows) {
+    private DayStat dayStat(List<Map<String, Object>> rows) {
         int nPred = rows.size(), nVerified = 0, nCorrect = 0;
         int upHit = 0, upN = 0, downHit = 0, downN = 0;
-        double sumUp = 0, sumDown = 0; int cntUp = 0, cntDown = 0;
-        Map<LocalDate, List<double[]>> byDate = new HashMap<>();
+        double sumUp = 0, sumDown = 0;
+        int cntUp = 0, cntDown = 0;
+        double[] prob = new double[nPred], rets = new double[nPred];
+        int m = 0;
         for (Map<String, Object> r : rows) {
             int dir = intVal(r.get("predDirection"));
             Object correct = r.get("isCorrect");
             double ret = dbl(r.get("actualReturn"));
-            double prob = dbl(r.get("probUp"));
             if (dir != 0 && correct instanceof Number) {
                 nVerified++;
                 int c = ((Number) correct).intValue();
@@ -109,23 +132,21 @@ public class MetricService {
                 if (dir == 1) { upN++; upHit += c; sumUp += ret; cntUp++; }
                 else { downN++; downHit += c; sumDown += ret; cntDown++; }
             }
-            LocalDate d = LocalDate.parse(String.valueOf(r.get("tradeDate")).substring(0, 10));
-            byDate.computeIfAbsent(d, k -> new ArrayList<>()).add(new double[]{prob, ret});
+            prob[m] = dbl(r.get("probUp"));
+            rets[m] = ret;
+            m++;
         }
-        double ic = 0; int icDays = 0;
-        for (List<double[]> list : byDate.values()) {
-            if (list.size() < 5) continue;
-            double[] a = new double[list.size()], b = new double[list.size()];
-            for (int i = 0; i < list.size(); i++) { a[i] = list.get(i)[0]; b[i] = list.get(i)[1]; }
-            ic += GaMath.spearman(a, b); icDays++;
+        // 当日截面 IC（预测概率与实际收益的秩相关），窗口汇总时按天平均
+        double ic = 0;
+        int icDays = 0;
+        if (nPred >= 5) {
+            ic = GaMath.spearman(java.util.Arrays.copyOf(prob, m), java.util.Arrays.copyOf(rets, m));
+            icDays = 1;
         }
-        ic = icDays == 0 ? 0 : ic / icDays;
-        double avgUp = cntUp == 0 ? 0 : sumUp / cntUp, avgDown = cntDown == 0 ? 0 : sumDown / cntDown;
-        return new Object[]{Date.valueOf(day), h, scopeType, scopeValue, window, replay,
-                nPred, nVerified, nCorrect,
-                GaMath.div(nCorrect, nVerified, 0), GaMath.div(upHit, upN, 0), GaMath.div(downHit, downN, 0),
-                GaMath.div(nVerified, nPred, 0), ic, avgUp, avgDown, avgUp - avgDown};
+        return new DayStat(nPred, nVerified, nCorrect, upHit, upN, downHit, downN,
+                sumUp, cntUp, sumDown, cntDown, ic, icDays);
     }
+
 
     /** 因子体检（规格 10.2）：截面 Rank IC 与衰减预警。 */
     public String factorIc(LocalDate asOf, int h) {

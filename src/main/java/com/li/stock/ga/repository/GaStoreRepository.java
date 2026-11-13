@@ -214,7 +214,7 @@ public class GaStoreRepository {
     private static final String PRED_INSERT = "INSERT INTO `ga_prediction` (`trade_date`,`code`,`market`,"
             + "`adjustflag`,`horizon`,`model_role`,`is_replay`,`in_pool`,`champion_version`,`pred_direction`,"
             + "`prob_up`,`confidence`,`score_raw`,`base_close`,`limit_flag`,`is_st`,`vol_20`,`amount_ma_20`,"
-            + "`pe_ttm`,`regime`,`explain_json`,`status`) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,'PENDING')";
+            + "`pe_ttm`,`regime`,`explain_json`,`status`) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,'PENDING')";
 
     /** 只删 PENDING 行后插入，已验证的记录永不改写。 */
     public int replacePendingPredictions(LocalDate date, int horizon, String role, int isReplay,
@@ -233,6 +233,14 @@ public class GaStoreRepository {
     public List<Map<String, Object>> pendingPredictions(int limit) {
         return jdbc.queryForList("SELECT `id`,`trade_date`,`code`,`market`,`horizon`,`model_role`,`is_replay`,"
                 + "`vol_20`,`status` FROM `ga_prediction` WHERE `status`='PENDING' ORDER BY `trade_date` LIMIT ?", limit)
+                .stream().map(this::camel).toList();
+    }
+
+    /** 按主键游标分页读取待回填预测，避免一次把全表读进内存。 */
+    public List<Map<String, Object>> pendingPredictionsAfter(long afterId, int limit) {
+        return jdbc.queryForList("SELECT `id`,`trade_date`,`code`,`market`,`horizon`,`model_role`,`is_replay`,"
+                        + "`vol_20`,`pred_direction`,`status` FROM `ga_prediction` "
+                        + "WHERE `status`='PENDING' AND `id`>? ORDER BY `id` LIMIT ?", afterId, limit)
                 .stream().map(this::camel).toList();
     }
 
@@ -304,7 +312,10 @@ public class GaStoreRepository {
     }
 
     public List<Map<String, Object>> allPredictionsForMetric(LocalDate from, LocalDate to, int limit) {
-        return jdbc.queryForList("SELECT * FROM `ga_prediction` WHERE `status`='VERIFIED' "
+        // 只投影统计需要的列：explain_json 等大字段会让几十万行直接把堆吃满
+        return jdbc.queryForList("SELECT `trade_date`,`horizon`,`code`,`market`,`model_role`,`is_replay`,"
+                + "`in_pool`,`pred_direction`,`prob_up`,`actual_return`,`is_correct`,`regime` "
+                + "FROM `ga_prediction` WHERE `status`='VERIFIED' "
                 + "AND `trade_date` BETWEEN ? AND ? ORDER BY `trade_date` LIMIT ?",
                 Date.valueOf(from), Date.valueOf(to), limit).stream().map(this::camel).toList();
     }
@@ -314,7 +325,7 @@ public class GaStoreRepository {
     private static final String METRIC_UPSERT = "INSERT INTO `ga_metric_daily` (`as_of_date`,`horizon`,"
             + "`scope_type`,`scope_value`,`window_days`,`is_replay`,`n_pred`,`n_verified`,`n_correct`,"
             + "`hit_rate`,`up_hit_rate`,`down_hit_rate`,`coverage`,`ic`,`avg_ret_up`,`avg_ret_down`,`spread`) "
-            + "VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?) ON DUPLICATE KEY UPDATE "
+            + "VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?) ON DUPLICATE KEY UPDATE "
             + "`n_pred`=VALUES(`n_pred`),`n_verified`=VALUES(`n_verified`),`n_correct`=VALUES(`n_correct`),"
             + "`hit_rate`=VALUES(`hit_rate`),`up_hit_rate`=VALUES(`up_hit_rate`),"
             + "`down_hit_rate`=VALUES(`down_hit_rate`),`coverage`=VALUES(`coverage`),`ic`=VALUES(`ic`),"
@@ -412,9 +423,26 @@ public class GaStoreRepository {
     }
 
     public void logJob(String job, String status, String message, int processed) {
+        logJob(job, status, message, processed, java.time.LocalDateTime.now());
+    }
+
+    /** 记录真实开始时间，便于看板显示耗时（旧实现 started_at/finished_at 都写成完成时刻）。 */
+    public void logJob(String job, String status, String message, int processed,
+                       java.time.LocalDateTime startedAt) {
+        java.time.LocalDateTime start = startedAt == null ? java.time.LocalDateTime.now() : startedAt;
+        // 开始与结束都用 JVM 时钟，避免与数据库 NOW() 有几秒时钟差时出现「负耗时」
         jdbc.update("INSERT INTO `ga_job_log` (`job_name`,`status`,`message`,`processed`,`started_at`,"
-                + "`finished_at`) VALUES (?,?,?,?,NOW(),NOW())", job, status,
-                message == null ? "" : message.substring(0, Math.min(1000, message.length())), processed);
+                        + "`finished_at`) VALUES (?,?,?,?,?,?)", job, status,
+                message == null ? "" : message.substring(0, Math.min(1000, message.length())), processed,
+                java.sql.Timestamp.valueOf(start), java.sql.Timestamp.valueOf(java.time.LocalDateTime.now()));
+    }
+
+    /** 最近 N 条任务日志（新→旧），供「后台任务」页的运行历史使用。 */
+    public List<Map<String, Object>> recentJobLogs(int limit) {
+        int n = Math.max(1, Math.min(200, limit));
+        return jdbc.queryForList("SELECT `id`,`job_name`,`status`,`message`,`processed`,`started_at`,"
+                        + "`finished_at`,`created_at` FROM `ga_job_log` ORDER BY `id` DESC LIMIT ?", n)
+                .stream().map(this::camel).toList();
     }
 
     public List<Map<String, Object>> jobStatus() {

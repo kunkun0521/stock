@@ -39,7 +39,9 @@ public class PoolService {
 
     public String evaluate(LocalDate asOf, boolean weekly) {
         int flag = config.globalInt("adjust_flag");
-        LocalDate from = asOf.minusDays(150);
+        // 加载窗口必须覆盖 NEW_LISTING 的最少有效交易日，否则所有股票都会被误判为次新股
+        long lookbackDays = Math.max(400L, config.globalInt("new_listing_days") * 2L);
+        LocalDate from = asOf.minusDays(lookbackDays);
         Map<String, List<Bar>> bars = data.loadBarsWithScores(flag, from, asOf);
         Map<String, Object> states = store.poolStates();
         Map<String, HitRate> hits = hitRates(asOf);

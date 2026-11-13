@@ -111,12 +111,17 @@ public class PredictionService {
             try { explain = JSON.writeValueAsString(s.explain()); } catch (Exception e) { explain = "[]"; }
             rows.add(new Object[]{
                     Date.valueOf(t), v.code(), v.market(), flag, h, role, isReplay, inPool ? 1 : 0,
-                    version, s.direction(), s.pCal(), s.confidence(), s.scoreRaw(),
-                    b == null ? null : b.close(), v.limitFlag(), b == null ? 0 : b.isSt(),
-                    v.vol20(), b == null ? null : b.amount(), b == null ? null : b.peTtm(),
+                    version, s.direction(), num(s.pCal()), num(s.confidence()), num(s.scoreRaw()),
+                    b == null ? null : num(b.close()), v.limitFlag(), b == null ? 0 : b.isSt(),
+                    num(v.vol20()), b == null ? null : num(b.amount()), b == null ? null : num(b.peTtm()),
                     market.getOrDefault("regime", 2), explain});
         }
         return rows;
+    }
+
+    /** 批量写入前清洗非有限值：NaN/Infinity 在 rewriteBatchedStatements 下会被拼进 SQL 导致语法错误。 */
+    private static Double num(double v) {
+        return Double.isFinite(v) ? v : null;
     }
 
     private ChampionService.Ensemble shadowEnsemble(int h) {
@@ -149,51 +154,61 @@ public class PredictionService {
     /** 到期回填；重复执行结果不变，超过 voidDays 仍凑不满 h 个交易日置 VOID。 */
     public String verify(LocalDate asOf) {
         int flag = config.globalInt("adjust_flag");
-        List<Map<String, Object>> pending = store.pendingPredictions(200000);
-        if (pending.isEmpty()) return "没有待回填预测";
-        LocalDate min = pending.stream().map(r -> LocalDate.parse(String.valueOf(r.get("tradeDate")).substring(0, 10)))
-                .min(LocalDate::compareTo).orElse(asOf);
-        var tradable = data.tradableDatesByStock(flag, min, asOf);
-        Map<String, Double> closes = data.closeMap(flag, min, asOf);
         int voidDays = config.globalInt("verify_void_days");
         int batchSize = config.globalInt("verify_batch_size");
+        int pageSize = Math.max(1000, config.globalInt("verify_page_size"));
 
-        List<Object[]> updates = new ArrayList<>();
-        int verified = 0, voided = 0;
-        for (Map<String, Object> r : pending) {
-            LocalDate t = LocalDate.parse(String.valueOf(r.get("tradeDate")).substring(0, 10));
-            String code = String.valueOf(r.get("code")), market = String.valueOf(r.get("market"));
-            int h = ((Number) r.get("horizon")).intValue();
-            String key = GaDataRepository.key(code, market);
-            LocalDate target = LabelBuilder.targetDate(tradable.getOrDefault(key, List.of()), t, h);
-            Object[] args = new Object[8];
-            long id = ((Number) r.get("id")).longValue();
-            if (target == null) {
-                if (t.plusDays(voidDays).isBefore(asOf)) {
-                    args[0] = "VOID"; args[7] = id;
-                    for (int i = 1; i < 7; i++) args[i] = null;
-                    updates.add(args); voided++;
+        long cursor = 0;
+        int total = 0, verified = 0, voided = 0;
+        while (true) {
+            List<Map<String, Object>> pending = store.pendingPredictionsAfter(cursor, pageSize);
+            if (pending.isEmpty()) break;
+            total += pending.size();
+            cursor = pending.stream().mapToLong(r -> ((Number) r.get("id")).longValue()).max().orElse(cursor);
+
+            LocalDate min = pending.stream()
+                    .map(r -> LocalDate.parse(String.valueOf(r.get("tradeDate")).substring(0, 10)))
+                    .min(LocalDate::compareTo).orElse(asOf);
+            var tradable = data.tradableDatesByStock(flag, min, asOf);
+            Map<String, Double> closes = data.closeMap(flag, min, asOf);
+
+            List<Object[]> updates = new ArrayList<>();
+            for (Map<String, Object> r : pending) {
+                LocalDate t = LocalDate.parse(String.valueOf(r.get("tradeDate")).substring(0, 10));
+                String code = String.valueOf(r.get("code")), market = String.valueOf(r.get("market"));
+                int h = ((Number) r.get("horizon")).intValue();
+                String key = GaDataRepository.key(code, market);
+                LocalDate target = LabelBuilder.targetDate(tradable.getOrDefault(key, List.of()), t, h);
+                Object[] args = new Object[8];
+                long id = ((Number) r.get("id")).longValue();
+                if (target == null) {
+                    if (t.plusDays(voidDays).isBefore(asOf)) {
+                        args[0] = "VOID"; args[7] = id;
+                        for (int i = 1; i < 7; i++) args[i] = null;
+                        updates.add(args); voided++;
+                    }
+                    continue;
                 }
-                continue;
+                Double c0 = closes.get(key + "|" + t), c1 = closes.get(key + "|" + target);
+                if (c0 == null || c1 == null || c0 <= 0) continue;
+                double ret = c1 / c0 - 1;
+                int actual = ret > 0 ? 1 : ret < 0 ? -1 : 0;
+                int pred = ((Number) r.getOrDefault("predDirection", 0)).intValue();
+                Integer correct = pred == 0 ? null : (pred == actual ? 1 : 0);
+                Object vol20 = r.get("vol20");
+                double theta = labels.threshold(h, vol20 instanceof Number n ? n.doubleValue() : 0);
+                Integer effective = correct != null && correct == 1 && Math.abs(ret) >= theta ? 1 : 0;
+                args[0] = "VERIFIED"; args[1] = Date.valueOf(target); args[2] = c1;
+                args[3] = ret; args[4] = actual; args[5] = correct; args[6] = effective; args[7] = id;
+                updates.add(args); verified++;
             }
-            Double c0 = closes.get(key + "|" + t), c1 = closes.get(key + "|" + target);
-            if (c0 == null || c1 == null || c0 <= 0) continue;
-            double ret = c1 / c0 - 1;
-            int actual = ret > 0 ? 1 : ret < 0 ? -1 : 0;
-            int pred = ((Number) r.getOrDefault("predDirection", 0)).intValue();
-            Integer correct = pred == 0 ? null : (pred == actual ? 1 : 0);
-            Object vol20 = r.get("vol20");
-            double theta = labels.threshold(h, vol20 instanceof Number n ? n.doubleValue() : 0);
-            Integer effective = correct != null && correct == 1 && Math.abs(ret) >= theta ? 1 : 0;
-            args[0] = "VERIFIED"; args[1] = Date.valueOf(target); args[2] = c1;
-            args[3] = ret; args[4] = actual; args[5] = correct; args[6] = effective; args[7] = id;
-            updates.add(args); verified++;
+            for (int i = 0; i < updates.size(); i += batchSize) {
+                store.batchVerify(updates.subList(i, Math.min(updates.size(), i + batchSize)));
+            }
         }
-        for (int i = 0; i < updates.size(); i += batchSize) {
-            store.batchVerify(updates.subList(i, Math.min(updates.size(), i + batchSize)));
-        }
-        return String.format("回填 %d 条 VERIFIED、%d 条 VOID，%d 条仍 PENDING", verified, voided,
-                pending.size() - verified - voided);
+        if (total == 0) return "没有待回填预测";
+        return String.format("回填 %d 条 VERIFIED、%d 条 VOID，%d 条仍 PENDING（未到期或缺少行情）",
+                verified, voided, total - verified - voided);
     }
 
     // ------------------------------------------------------------------ 历史回放

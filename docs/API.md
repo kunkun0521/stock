@@ -98,7 +98,7 @@ primary key (code, market, trade_date, adjustflag)
 | 方法 | 路径 | 说明 |
 | --- | --- | --- |
 | PUT | `/config` | 热更新配置 `{scope,paramKey,paramValue}`；跨域直连需后端放行 PUT（已配置） |
-| POST | `/jobs/run` | 触发任务 `{job}`；job 取 `FeatureJob/PredictJob/VerifyJob/MetricJob/PoolJob/EvolveJob/CalibrateJob/FactorIcJob/ReplayJob/DailyPipeline/WeeklyEvolve` |
+| POST | `/jobs/run` | 触发任务 `{job}`；job 取 `InitJob/FeatureJob/PredictJob/VerifyJob/MetricJob/PoolJob/EvolveJob/CalibrateJob/FactorIcJob/ReplayJob/DailyPipeline/WeeklyEvolve` |
 | POST | `/jobs/schedule/toggle` | 切换定时触发运行时开关 `{enabled}`，只影响 @Scheduled，不影响手动运行 |
 | POST | `/jobs/schedule/fire` | 按定时规则立即执行一次 `{kind:daily\|weekly}`，与 @Scheduled 同一提交路径 |
 | POST | `/pool/override` | 手工淘汰/复活/白名单 `{code,market,action,remark}`（remark 必填） |
@@ -110,4 +110,25 @@ primary key (code, market, trade_date, adjustflag)
 ### 6.3 使用顺序（首次）
 
 `FeatureJob`（自动回填全历史特征）→ `EvolveJob` → `PredictJob` → `PoolJob` → 到期后 `VerifyJob` → `MetricJob`。
+
+**冷启动 / 看板空数据：`InitJob`**（推荐直接等它自动跑，不必手工按顺序点）：
+
+- 后端启动 60 秒后（`stock.ga.init-delay-ms`）自动检查一次，之后每 `stock.ga.init-check-ms` 复查；
+  只要最近 `init_days`（ga_config 全局项，默认 10）个交易日中有任何一天没有实盘 `is_replay=0` 冠军预测，
+  就提交一次 `InitJob`。数据齐了直接跳过，因此实际只会真正执行一次；手动 `POST /jobs/run {"job":"InitJob"}` 不受开关影响。
+- `stock.ga.init-enabled=false` 可关闭自动检查（例如本地起第二个实例做验证时）。
+- 执行内容：按最近 10 个交易日逐日生成实盘 CHAMPION/SHADOW 预测 → `VerifyJob` 全量回填 →
+  `MetricJob` 重建指标 → 逐日跑 5 个周期的因子 IC → `PoolJob` 刷新股票池。
+  所有写入都是真实特征值 + 真实收盘价 + 当前活跃冠军集的计算结果，不是随机数造数；
+  但它属于「用现有模型回灌历史」，与每日 17:30 `DailyPipeline` 当时产生的盘后预测时间点不同，
+  仅用于看板冷启动展示，不应作为实盘业绩评估依据。
+- 幂等：窗口内已有实盘冠军预测的交易日跳过生成；写入沿用 `ON DUPLICATE KEY UPDATE id=id`，
+  已 `VERIFIED/VOID` 的行永不改写。重复触发只会重跑回填/汇总，不会破坏结果。
+- 看板默认「仅实盘」只查 `is_replay=0`，历史回放 (`is_replay=1`) 数据不会出现在总览/趋势/日历/选股里，
+  这正是冷启动需要 `InitJob` 的原因；想看长周期复盘可在总览切「含回放」或跑 `/evolution/replay`。
+
+**幂等性**：`PredictJob` / `ReplayJob` 可重复触发。写预测前只删除同键的 `PENDING` 行，
+`INSERT ... ON DUPLICATE KEY UPDATE id=id` 保证撞到已回填的 `VERIFIED/VOID` 记录时保持原样、
+不抛 `DuplicateKeyException`；回放断点由 `ga_run` 的 REPLAY 成功记录跳过，某交易日各周期已齐全时
+也不再重复生成。因此历史回放重跑不会改写已验证结果，需要重新回填时请先跑 `VerifyJob`。
 复盘数据需跑 `/evolution/replay` 生成历史预测并回填。

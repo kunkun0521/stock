@@ -19,9 +19,11 @@ import org.springframework.stereotype.Service;
 import java.time.LocalDate;
 import java.time.LocalDateTime;
 import java.util.ArrayList;
+import java.util.HashSet;
 import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Map;
+import java.util.Set;
 import java.util.concurrent.Callable;
 import java.util.concurrent.ConcurrentHashMap;
 import java.util.concurrent.ExecutorService;
@@ -49,7 +51,7 @@ public class GaJobRunner {
 
     /** 看板 jobs/status 列出的全部可执行任务，顺序即展示顺序。 */
     public static final List<String> JOB_NAMES = List.of(
-            "FeatureJob", "PredictJob", "VerifyJob", "MetricJob", "PoolJob",
+            "InitJob", "FeatureJob", "PredictJob", "VerifyJob", "MetricJob", "PoolJob",
             "EvolveJob", "CalibrateJob", "FactorIcJob", "ReplayJob",
             "DailyPipeline", "WeeklyEvolve");
 
@@ -73,6 +75,10 @@ public class GaJobRunner {
     /** 配置文件总开关：false 时关闭所有定时触发，看板手动触发仍可用。 */
     @Value("${stock.ga.enabled:true}")
     private boolean enabled;
+
+    /** 一次性数据初始化开关：只影响启动后的自动检查，手动「立即运行 InitJob」始终可用。 */
+    @Value("${stock.ga.init-enabled:true}")
+    private boolean initEnabled;
 
     /**
      * 运行时开关（看板可切换），null 表示跟随配置文件。
@@ -114,6 +120,45 @@ public class GaJobRunner {
             return;
         }
         submitInternal("WeeklyEvolve", true);
+    }
+
+    /**
+     * 一次性数据初始化：启动后延迟检查一次，之后每小时复查。
+     *
+     * <p>只有「实盘预测覆盖不足 init_days 个交易日」时才真正提交 InitJob，
+     * 数据齐了就直接返回，因此实际只会执行一次；新交易日出现缺数据时会自动补一次。
+     * 提交走 GA 自己的单线程队列，不占用 Spring 的调度线程。</p>
+     */
+    @Scheduled(initialDelayString = "${stock.ga.init-delay-ms:60000}",
+            fixedDelayString = "${stock.ga.init-check-ms:3600000}")
+    public void scheduledInit() {
+        if (!initEnabled || !enabled) return;
+        try {
+            if (needsInit(config.globalInt("adjust_flag"))) {
+                log.info("[GA] 检测到实盘数据不足 {} 个交易日，自动提交 InitJob",
+                        config.globalInt("init_days"));
+                submitInternal("InitJob", false);
+            }
+        } catch (Exception e) {
+            // 自动检查失败不抛给调度线程，下次检查会重试；也可在看板手动触发
+            log.warn("[GA] 初始化自动检查失败：{}", e.getMessage());
+        }
+    }
+
+    public boolean isInitEnabled() { return initEnabled && enabled; }
+
+    /** 看板 jobs/schedule 展示：初始化窗口是否已齐。 */
+    public boolean isInitReady() { return !needsInit(config.globalInt("adjust_flag")); }
+
+    /** 最近 init_days 个交易日是否都存在实盘（is_replay=0）冠军预测。 */
+    private boolean needsInit(int flag) {
+        LocalDate latest = data.latestDate(flag);
+        if (latest == null) return false;
+        List<LocalDate> window = recentTradeDates(flag, latest,
+                Math.max(1, config.globalInt("init_days")));
+        if (window.isEmpty()) return false;
+        Set<LocalDate> have = new HashSet<>(store.livePredictionDates(window.get(0), latest));
+        return window.stream().anyMatch(d -> !have.contains(d));
     }
 
     // ------------------------------------------------------------------ 定时开关 / 模拟触发
@@ -237,6 +282,7 @@ public class GaJobRunner {
             return today + " 非交易日（行情库尚无当日数据），跳过";
         }
         return switch (name) {
+            case "InitJob" -> bootstrap(flag);
             case "FeatureJob" -> feature(flag, today);
             case "PredictJob" -> predict(flag);
             case "VerifyJob" -> predictions.verify(today);
@@ -374,6 +420,64 @@ public class GaJobRunner {
         List<String> steps = new ArrayList<>();
         for (int h : config.horizons()) steps.add(metrics.factorIc(today, h));
         return String.join("；", steps);
+    }
+
+    /**
+     * 冷启动初始化：给最近 init_days 个交易日补齐「实盘口径」(is_replay=0) 的完整数据，
+     * 让总览 / 趋势 / 日历 / 预测复盘 / 选股 / 分析 / 个股 / 因子页默认视图都有内容。
+     *
+     * <p>数据不是随机造数：用当前活跃冠军集 + 当日真实特征与行情重算历史预测，
+     * 再用真实收盘价回填命中结果，属于「用现有模型回灌历史」，仅供看板演示与冷启动；
+     * 与每日 17:30 DailyPipeline 产生的盘后预测口径一致，但生成时间点不同。</p>
+     *
+     * <p>幂等：已存在实盘冠军预测的交易日不再生成；写入走 replacePendingPredictions
+     * 的 ODKU，已 VERIFIED 的历史行永远不会被改写。</p>
+     */
+    private String bootstrap(int flag) {
+        LocalDate latest = data.latestDate(flag);
+        if (latest == null) return "行情库没有交易日，跳过初始化";
+        int days = Math.max(1, config.globalInt("init_days"));
+        List<LocalDate> window = recentTradeDates(flag, latest, days);
+        if (window.isEmpty()) return "行情库内找不到可用交易日，跳过初始化";
+        LocalDate from = window.get(0);
+
+        Set<LocalDate> have = new HashSet<>(store.livePredictionDates(from, latest));
+        List<LocalDate> missing = window.stream().filter(d -> !have.contains(d)).toList();
+
+        List<String> steps = new ArrayList<>();
+        if (data.countFeatureDays(flag) < MIN_FEATURE_DAYS) {
+            FeatureService.BuildResult built = ensureFeatures(flag, latest);
+            steps.add(String.format("特征回填 %d 行 / %d 个交易日", built.written(),
+                    data.countFeatureDays(flag)));
+        }
+        if (missing.isEmpty()) {
+            steps.add("窗口内 " + window.size() + " 个交易日已有实盘预测，跳过生成");
+        } else {
+            for (LocalDate d : missing) {
+                steps.add(d + " 预测：" + predictions.predictDay(d, 0, true));
+            }
+        }
+        steps.add("回填：" + predictions.verify(latest));
+        steps.add("指标：" + metrics.rebuild(latest));
+        // 截面 IC 计算较重，已算过的交易日不再重复；重复触发 InitJob 时这一步几乎零耗时
+        Set<LocalDate> icHave = new HashSet<>(store.factorIcDates(from, latest));
+        int icDays = 0;
+        for (LocalDate d : window) {
+            if (icHave.contains(d)) continue;
+            for (int h : config.horizons()) metrics.factorIc(d, h);
+            icDays++;
+        }
+        steps.add(String.format("因子体检：补 %d 个交易日（窗口共 %d 天）", icDays, window.size()));
+        steps.add("股票池：" + pool.evaluate(latest, false));
+        steps.add(String.format("初始化完成：窗口 [%s, %s] %d 个交易日，本次补生成 %d 天",
+                from, latest, window.size(), missing.size()));
+        return String.join("；", steps);
+    }
+
+    /** 取 asOf 往前最近 days 个有行情的交易日（升序）。 */
+    private List<LocalDate> recentTradeDates(int flag, LocalDate asOf, int days) {
+        List<LocalDate> all = data.tradeDates(flag, asOf.minusDays(Math.max(30L, days * 4L)), asOf);
+        return all.size() > days ? all.subList(all.size() - days, all.size()) : all;
     }
 
     /** 看板不传日期时的默认回放：最近约 60 个交易日、步长取 ga_config 的 replay_step。 */

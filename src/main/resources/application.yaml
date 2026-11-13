@@ -69,3 +69,8 @@ stock:
     enabled: true
     cron-daily: "0 30 17 * * ?"
     cron-evolve: "0 0 2 ? * SAT"
+    # 冷启动初始化：启动 60 秒后检查一次，实盘预测不足 init_days 个交易日时自动跑一次 InitJob；
+    # 之后每小时复查，数据齐了即跳过（手动「立即运行 InitJob」不受此开关影响）
+    init-enabled: true
+    init-delay-ms: 60000
+    init-check-ms: 3600000

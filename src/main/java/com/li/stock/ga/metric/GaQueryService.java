@@ -1,5 +1,7 @@
 package com.li.stock.ga.metric;
 
+import com.fasterxml.jackson.core.type.TypeReference;
+import com.fasterxml.jackson.databind.ObjectMapper;
 import com.li.stock.ga.GaMath;
 import com.li.stock.ga.config.GaConfig;
 import com.li.stock.ga.repository.GaDataRepository;
@@ -34,6 +36,21 @@ public class GaQueryService {
     }
 
     private static final String VERIFIED = " `status`='VERIFIED' AND `model_role`='CHAMPION' AND `in_pool`=1 ";
+    private static final ObjectMapper JSON = new ObjectMapper();
+
+    /** explain_json 是 [{f,z,c},...]；解析失败时返回空数组，不让整个个股详情接口挂掉。 */
+    private static List<Map<String, Object>> parseExplain(Object raw) {
+        if (raw == null) return List.of();
+        try {
+            // MySQL Connector/J 对 JSON 列通常返回 String，但不同版本也可能给 byte[]
+            if (raw instanceof byte[] bytes) {
+                return JSON.readValue(bytes, new TypeReference<List<Map<String, Object>>>() {});
+            }
+            return JSON.readValue(String.valueOf(raw), new TypeReference<List<Map<String, Object>>>() {});
+        } catch (Exception e) {
+            return List.of();
+        }
+    }
 
     // ------------------------------------------------------------------ 总览
 
@@ -70,7 +87,7 @@ public class GaQueryService {
         kpi.put("coverage", coverage(from, to, horizon, includeReplay));
         kpi.put("avgIc", avgIc(from, to, horizon));
         kpi.put("nVerified", n);
-        kpi.put("championVersion", horizon == null || horizon <= 0 ? "" : store.currentVersionTag(horizon));
+        kpi.put("championVersion", currentVersionTag(horizon));
         kpi.put("effectiveFrom", currentEffectiveFrom());
         kpi.put("eliminatedCount", eliminatedCount());
 
@@ -122,6 +139,16 @@ public class GaQueryService {
                 + "WHERE `scope_type`='ALL' AND `window_days`=20 AND `as_of_date` BETWEEN ? AND ?" + extra, a.toArray());
         return rows.stream().mapToDouble(r -> r.get("ic") instanceof Number n ? n.doubleValue() : 0)
                 .average().orElse(0);
+    }
+
+    /** 「全部周期」视图也展示一个当前生效的冠军版本，避免 KPI 卡片显示空值。 */
+    private String currentVersionTag(Integer horizon) {
+        if (horizon != null && horizon > 0) return store.currentVersionTag(horizon);
+        for (int h : config.horizons()) {
+            String v = store.currentVersionTag(h);
+            if (v != null && !v.isBlank()) return v;
+        }
+        return "";
     }
 
     private Object currentEffectiveFrom() {
@@ -197,7 +224,8 @@ public class GaQueryService {
                 + "`horizon`,`pred_direction` `predDirection`,`prob_up` `probUp`,`confidence`,`is_correct` `isCorrect`,"
                 + "`actual_return` `actualReturn`,`status`,`explain_json` `explainJson`,`model_role` `modelRole` "
                 + "FROM `ga_prediction` WHERE `code`=? AND `market`=? AND `trade_date` BETWEEN ? AND ?" + hextra
-                + " ORDER BY `trade_date` DESC,`horizon` LIMIT 500", args.toArray());
+                // 180 天 × 5 周期 × 主榜/影子最多约 2000 条，放宽上限避免早期日期的预测标记被截掉
+                + " ORDER BY `trade_date` DESC,`horizon` LIMIT 3000", args.toArray());
         List<Map<String, Object>> marks = new ArrayList<>(), latest = new ArrayList<>();
         java.util.Set<Integer> seen = new java.util.HashSet<>();
         for (Map<String, Object> p : preds) {
@@ -207,7 +235,8 @@ public class GaQueryService {
             int h = num(p.get("horizon"));
             if ("CHAMPION".equals(String.valueOf(p.get("modelRole"))) && seen.add(h)) {
                 Map<String, Object> card = new LinkedHashMap<>(p);
-                card.put("explain", List.of());
+                card.put("explain", parseExplain(p.get("explainJson")));
+                card.remove("explainJson");
                 latest.add(card);
             }
         }

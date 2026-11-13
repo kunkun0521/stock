@@ -28,8 +28,22 @@ public class MetricService {
     private final GaStoreRepository store;
     private final GaDataRepository data;
 
+    /** 特征截面缓存：逐日跑因子体检时相邻日期的 20 日窗口高度重叠，避免重复查全市场。 */
+    private final Map<LocalDate, Map<String, double[]>> crossCache = new LinkedHashMap<>();
+
     public MetricService(GaConfig config, GaStoreRepository store, GaDataRepository data) {
         this.config = config; this.store = store; this.data = data;
+    }
+
+    private Map<String, double[]> crossSection(LocalDate day, int flag, Set<String> keys) {
+        synchronized (crossCache) {
+            Map<String, double[]> hit = crossCache.get(day);
+            if (hit != null) return hit;
+            Map<String, double[]> loaded = data.featureCrossSection(day, flag, keys);
+            if (crossCache.size() >= 120) crossCache.remove(crossCache.keySet().iterator().next());
+            crossCache.put(day, loaded);
+            return loaded;
+        }
     }
 
     /** 汇总 ALL / 板块 / 市场状态 × 当日 / 近20 / 近60 个基准日 × 实盘 / 回放。 */
@@ -38,11 +52,12 @@ public class MetricService {
         List<Object[]> args = new ArrayList<>();
         for (int h : config.horizons()) {
             for (int replay : new int[]{0, 1}) {
-                // 分段读取、增量合并日统计：内存只保留当天统计量，不再把几十万行明细同时放堆里
+                // 14 天分段 + SQL 下推周期/口径 + 增量合并：单段最多几万行，
+                // 既不会把明细堆满内存，也不会像旧版 30 天段那样被 LIMIT 40 万截断（9 月单月已超）
                 Map<String, Map<LocalDate, DayStat>> stats = new LinkedHashMap<>();
-                for (LocalDate s = from; !s.isAfter(asOf); s = s.plusDays(30)) {
-                    LocalDate e = s.plusDays(29).isAfter(asOf) ? asOf : s.plusDays(29);
-                    List<Map<String, Object>> chunk = store.allPredictionsForMetric(s, e, 400000);
+                for (LocalDate s = from; !s.isAfter(asOf); s = s.plusDays(14)) {
+                    LocalDate e = s.plusDays(13).isAfter(asOf) ? asOf : s.plusDays(13);
+                    List<Map<String, Object>> chunk = store.allPredictionsForMetric(s, e, h, replay, 200000);
                     if (chunk.isEmpty()) continue;
                     Map<String, Map<LocalDate, List<Map<String, Object>>>> bucket = new LinkedHashMap<>();
                     for (Map<String, Object> r : chunk) {
@@ -151,7 +166,7 @@ public class MetricService {
     /** 因子体检（规格 10.2）：截面 Rank IC 与衰减预警。 */
     public String factorIc(LocalDate asOf, int h) {
         int flag = config.globalInt("adjust_flag");
-        List<Map<String, Object>> preds = store.verifiedChampion(asOf.minusDays(120), asOf, h, true, 200000);
+        List<Map<String, Object>> preds = store.verifiedReturns(asOf.minusDays(120), asOf, h, true, 200000);
         Map<LocalDate, Map<String, Double>> retByDate = new HashMap<>();
         for (Map<String, Object> p : preds) {
             LocalDate d = LocalDate.parse(String.valueOf(p.get("tradeDate")).substring(0, 10));
@@ -165,7 +180,7 @@ public class MetricService {
         Map<String, List<Double>> icSeries = new HashMap<>();
         for (String k : keys) icSeries.put(k, new ArrayList<>());
         for (LocalDate d : recent) {
-            Map<String, double[]> cross = data.featureCrossSection(d, flag, keys);
+            Map<String, double[]> cross = crossSection(d, flag, keys);
             Map<String, Double> rets = retByDate.getOrDefault(d, Map.of());
             List<String> codes = new ArrayList<>(rets.keySet());
             codes.retainAll(cross.keySet());

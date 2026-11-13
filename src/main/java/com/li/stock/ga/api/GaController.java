@@ -422,6 +422,9 @@ public class GaController {
         out.put("nextEvolve", nextFire(cronEvolve));
         out.put("dailyJob", "DailyPipeline");
         out.put("weeklyJob", "WeeklyEvolve");
+        out.put("initJob", "InitJob");
+        out.put("initEnabled", jobs.isInitEnabled());
+        out.put("initReady", jobs.isInitReady());
         out.put("timezone", "Asia/Shanghai");
         out.put("serverTime", LocalDateTime.now().format(TIME_FMT));
         out.put("executor", "单线程串行队列");

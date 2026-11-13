@@ -222,9 +222,14 @@ public class PredictionService {
         List<LocalDate> dates = data.tradeDates(flag, from, to);
         if (dates.isEmpty()) return "回放区间内没有交易日";
         List<String> log = new ArrayList<>();
+        int evolved = 0, predicted = 0, skipped = 0;
         for (int d = 0; d < dates.size(); d += Math.max(1, step)) {
             LocalDate cut = dates.get(d);
             LocalDate next = dates.get(Math.min(dates.size() - 1, d + step));
+            boolean newChampion = false;
+            // 先完成该断点所有周期的进化并落冠军集，再统一生成 (cut, next] 的预测。
+            // 旧实现把 predictDay 放在 horizon 循环内，同一批交易日被重复生成 horizons.size() 次，
+            // 既浪费时间又放大了与已回填记录撞唯一键的概率。
             for (int h : horizons) {
                 if (store.replayDone(cut, h)) { log.add(cut + " H" + h + " 已完成，跳过"); continue; }
                 GaEngine.EvolveResult res = engine.evolve(h, cut, "REPLAY",
@@ -234,13 +239,23 @@ public class PredictionService {
                     continue;
                 }
                 String version = champions.forceChampion(res.runId(), h, cut);
-                for (int i = d + 1; i <= Math.min(dates.size() - 1, d + step); i++) {
-                    predictDay(dates.get(i), 1, false);
-                }
+                newChampion = true;
+                evolved++;
                 log.add(String.format("%s H%d 回放完成，冠军集 %s，覆盖至 %s", cut, h, version, next));
             }
+            if (!newChampion) continue;
+            for (int i = d + 1; i <= Math.min(dates.size() - 1, d + step); i++) {
+                LocalDate t = dates.get(i);
+                // 本次要求的周期在该日都已生成过（尤其是已被 VerifyJob 回填成 VERIFIED 的），
+                // 直接跳过：已验证记录永不改写，不重复卷入写入；只补齐缺失周期。
+                if (store.replayHorizons(t).containsAll(horizons)) { skipped++; continue; }
+                predictDay(t, 1, false);
+                predicted++;
+            }
         }
-        store.logJob("ReplayJob", "SUCCESS", String.join("；", log), log.size());
-        return String.join("\n", log);
+        String summary = String.format("进化 %d 个断点周期，生成/补齐 %d 个交易日，跳过 %d 个已完整交易日",
+                evolved, predicted, skipped);
+        // 任务日志统一由 GaJobRunner / controller 写入，避免与外层重复记录 SUCCESS。
+        return log.isEmpty() ? summary : summary + "\n" + String.join("\n", log);
     }
 }

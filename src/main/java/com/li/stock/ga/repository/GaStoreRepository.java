@@ -214,9 +214,13 @@ public class GaStoreRepository {
     private static final String PRED_INSERT = "INSERT INTO `ga_prediction` (`trade_date`,`code`,`market`,"
             + "`adjustflag`,`horizon`,`model_role`,`is_replay`,`in_pool`,`champion_version`,`pred_direction`,"
             + "`prob_up`,`confidence`,`score_raw`,`base_close`,`limit_flag`,`is_st`,`vol_20`,`amount_ma_20`,"
-            + "`pe_ttm`,`regime`,`explain_json`,`status`) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,'PENDING')";
+            + "`pe_ttm`,`regime`,`explain_json`,`status`) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,'PENDING')"
+            // 回放重跑 / 重复触发时，该 (date,code,market,flag,horizon,role,is_replay) 可能已存在且已被
+            // VerifyJob 回填成 VERIFIED/VOID。已验证记录永不改写，冲突行做无操作，避免 DuplicateKeyException。
+            // 用 ON DUPLICATE KEY UPDATE 而非 INSERT IGNORE：只吞唯一键冲突，其它 SQL 错误照常抛出。
+            + " ON DUPLICATE KEY UPDATE `id`=`id`";
 
-    /** 只删 PENDING 行后插入，已验证的记录永不改写。 */
+    /** 只删 PENDING 行后插入，已验证的记录永不改写；重复触发幂等。 */
     public int replacePendingPredictions(LocalDate date, int horizon, String role, int isReplay,
                                          List<Object[]> rows) {
         jdbc.update("DELETE FROM `ga_prediction` WHERE `trade_date`=? AND `horizon`=? "
@@ -228,6 +232,16 @@ public class GaStoreRepository {
             jdbc.batchUpdate(PRED_INSERT, rows.subList(from, Math.min(rows.size(), from + batch)));
         }
         return rows.size();
+    }
+
+    /**
+     * 某交易日已生成回放预测的周期列表。用于回放断点续跑：本次要求的周期全部已生成的日子
+     * 不必重复计算，也避免反复删除/重插 PENDING 行造成无谓 churn。
+     */
+    public List<Integer> replayHorizons(LocalDate date) {
+        return jdbc.queryForList("SELECT DISTINCT `horizon` FROM `ga_prediction` "
+                        + "WHERE `trade_date`=? AND `is_replay`=1 AND `model_role`='CHAMPION'",
+                Integer.class, Date.valueOf(date));
     }
 
     public List<Map<String, Object>> pendingPredictions(int limit) {
@@ -302,6 +316,25 @@ public class GaStoreRepository {
                 .stream().map(this::camel).toList();
     }
 
+    /**
+     * 因子 IC 专用：只取截面 Rank IC 需要的 4 列，并按交易日倒序取最近 N 行。
+     *
+     * <p>verifiedChampion 是 SELECT * 且 ORDER BY trade_date 升序 + LIMIT，
+     * 单周期 120 天内已验证行可超 20 万，既会把 explain_json 大字段拉进堆，
+     * 又会把「最近 20 个交易日」截成最早的一个月，导致 IC 口径错误。</p>
+     */
+    public List<Map<String, Object>> verifiedReturns(LocalDate from, LocalDate to, int horizon,
+                                                     boolean includeReplay, int limit) {
+        StringBuilder w = new StringBuilder(" WHERE `status`='VERIFIED' AND `model_role`='CHAMPION' "
+                + "AND `in_pool`=1 AND `trade_date` BETWEEN ? AND ?");
+        List<Object> args = new ArrayList<>(List.of(Date.valueOf(from), Date.valueOf(to)));
+        if (horizon > 0) { w.append(" AND `horizon`=?"); args.add(horizon); }
+        if (!includeReplay) w.append(" AND `is_replay`=0");
+        w.append(" ORDER BY `trade_date` DESC, `id` DESC LIMIT ?"); args.add(limit);
+        return jdbc.queryForList("SELECT `trade_date`,`code`,`market`,`actual_return` FROM `ga_prediction`"
+                + w, args.toArray()).stream().map(this::camel).toList();
+    }
+
     /** 影子 / 冠军预测的非观望已验证行，用于晋升 BalAcc 比较。 */
     public List<Map<String, Object>> rolePredictions(int h, String role, int limit) {
         return jdbc.queryForList("SELECT `pred_direction`,`is_correct`,`horizon` FROM `ga_prediction` "
@@ -318,6 +351,33 @@ public class GaStoreRepository {
                 + "FROM `ga_prediction` WHERE `status`='VERIFIED' "
                 + "AND `trade_date` BETWEEN ? AND ? ORDER BY `trade_date` LIMIT ?",
                 Date.valueOf(from), Date.valueOf(to), limit).stream().map(this::camel).toList();
+    }
+
+    /**
+     * 指标汇总专用的窄查询：把 horizon / is_replay / CHAMPION / in_pool 全部下推到 SQL。
+     *
+     * <p>rebuild 会对 5 个周期 × 2 套口径各扫一遍区间，若不在 SQL 里过滤，
+     * 每个组合都要拉取全量明细（单月可超 40 万行），既慢又会撞到 LIMIT 截断。</p>
+     */
+    public List<Map<String, Object>> allPredictionsForMetric(LocalDate from, LocalDate to,
+                                                             int horizon, int replay, int limit) {
+        return jdbc.queryForList("SELECT `trade_date`,`horizon`,`code`,`market`,`model_role`,`is_replay`,"
+                + "`in_pool`,`pred_direction`,`prob_up`,`actual_return`,`is_correct`,`regime` "
+                + "FROM `ga_prediction` WHERE `status`='VERIFIED' AND `horizon`=? AND `is_replay`=? "
+                + "AND `model_role`='CHAMPION' AND `in_pool`=1 "
+                + "AND `trade_date` BETWEEN ? AND ? ORDER BY `trade_date` LIMIT ?",
+                horizon, replay, Date.valueOf(from), Date.valueOf(to), limit).stream().map(this::camel).toList();
+    }
+
+    /**
+     * 初始化窗口内已有「实盘」（is_replay=0）冠军预测的交易日，用于 InitJob 幂等判断：
+     * 只补缺失的日期，已经生成过的日子不重复计算。
+     */
+    public List<LocalDate> livePredictionDates(LocalDate from, LocalDate to) {
+        return jdbc.queryForList("SELECT DISTINCT `trade_date` FROM `ga_prediction` "
+                        + "WHERE `is_replay`=0 AND `model_role`='CHAMPION' AND `trade_date` BETWEEN ? AND ? "
+                        + "ORDER BY `trade_date`",
+                LocalDate.class, Date.valueOf(from), Date.valueOf(to));
     }
 
     // ------------------------------------------------------------------ ga_metric_daily
@@ -420,6 +480,13 @@ public class GaStoreRepository {
                         + "`ic_20`=VALUES(`ic_20`),`ic_60`=VALUES(`ic_60`),`icir_60`=VALUES(`icir_60`),"
                         + "`decay_flag`=VALUES(`decay_flag`)", Date.valueOf(date), horizon, feature,
                 ic20, ic60, icir, decay);
+    }
+
+    /** 已经有因子体检记录的交易日；InitJob 用它跳过重复计算（截面 IC 很贵）。 */
+    public List<LocalDate> factorIcDates(LocalDate from, LocalDate to) {
+        return jdbc.queryForList("SELECT DISTINCT `as_of_date` FROM `ga_factor_ic_daily` "
+                        + "WHERE `as_of_date` BETWEEN ? AND ? ORDER BY `as_of_date`",
+                LocalDate.class, Date.valueOf(from), Date.valueOf(to));
     }
 
     public void logJob(String job, String status, String message, int processed) {

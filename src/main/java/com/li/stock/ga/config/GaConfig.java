@@ -135,6 +135,7 @@ public class GaConfig {
         put("batch_size", "1000", "JDBC 批量写入每批条数");
         put("verify_batch_size", "5000", "回填每批条数");
         put("verify_page_size", "20000", "回填游标分页每页条数");
+        put("init_days", "10", "初始化任务回灌的最近交易日天数（看板冷启动展示用）");
     }
 
     public static Map<String, String> defaults() {

@@ -54,16 +54,38 @@ public class GaDataRepository {
 
     // ------------------------------------------------------------------ 交易日
 
+    /**
+     * 行情库最新交易日。
+     *
+     * <p>stock_daily_all 是 00/30/60 三张百万行表的 UNION ALL 视图，对视图做 MAX()
+     * 无法下推，实测要全扫 300 万行耗时约 6 秒，总览 / 任务页每次刷新都会被拖慢。
+     * 改为让每张子表各自走 idx_trade_date 倒序取第一行，再取三者最大值（实测 0.1 秒）。</p>
+     */
     public LocalDate latestDate(int flag) {
-        return jdbc.query("SELECT MAX(`trade_date`) FROM `stock_daily_all` WHERE `adjustflag` = ?",
-                (ResultSet rs) -> rs.next() ? localDate(rs.getDate(1)) : null, flag);
+        return jdbc.query("SELECT MAX(d) FROM ("
+                        + "(SELECT `trade_date` d FROM `stock_daily_00` WHERE `adjustflag`=? "
+                        + "ORDER BY `trade_date` DESC LIMIT 1) UNION ALL "
+                        + "(SELECT `trade_date` FROM `stock_daily_30` WHERE `adjustflag`=? "
+                        + "ORDER BY `trade_date` DESC LIMIT 1) UNION ALL "
+                        + "(SELECT `trade_date` FROM `stock_daily_60` WHERE `adjustflag`=? "
+                        + "ORDER BY `trade_date` DESC LIMIT 1)) t",
+                (ResultSet rs) -> rs.next() ? localDate(rs.getDate(1)) : null, flag, flag, flag);
     }
 
-    /** 有行情记录的交易日（升序）；用于有标签日、折切分、回放断点。 */
+    /** 有行情记录的交易日（升序）；用于有标签日、折切分、回放断点、初始化窗口。 */
     public List<LocalDate> tradeDates(int flag, LocalDate from, LocalDate to) {
-        return jdbc.queryForList("SELECT DISTINCT `trade_date` FROM `stock_daily_all` "
-                        + "WHERE `adjustflag` = ? AND `trade_date` BETWEEN ? AND ? ORDER BY `trade_date`",
-                LocalDate.class, flag, Date.valueOf(from), Date.valueOf(to));
+        // 同理避开 UNION ALL 视图上的 DISTINCT 全扫：三张子表各自按日期范围走索引再 UNION
+        return jdbc.queryForList("SELECT DISTINCT d FROM ("
+                        + "SELECT `trade_date` d FROM `stock_daily_00` "
+                        + "WHERE `adjustflag`=? AND `trade_date` BETWEEN ? AND ? UNION "
+                        + "SELECT `trade_date` FROM `stock_daily_30` "
+                        + "WHERE `adjustflag`=? AND `trade_date` BETWEEN ? AND ? UNION "
+                        + "SELECT `trade_date` FROM `stock_daily_60` "
+                        + "WHERE `adjustflag`=? AND `trade_date` BETWEEN ? AND ?) t ORDER BY d",
+                LocalDate.class,
+                flag, Date.valueOf(from), Date.valueOf(to),
+                flag, Date.valueOf(from), Date.valueOf(to),
+                flag, Date.valueOf(from), Date.valueOf(to));
     }
 
     /** 每只股票的可交易日（tradestatus=1）序列，用于到期日精确定位。 */

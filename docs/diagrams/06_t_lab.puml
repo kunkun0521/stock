@@ -1,0 +1,29 @@
+@startuml 06_t_lab
+skinparam backgroundColor #FEFEFE
+title 回本实验室 (/t-lab) 三子页
+
+actor 用户 as U
+package "回本实验室 com.li.stock.tlab 独立包" {
+  usecase "回本模拟\nPOST /api/t/simulate" as UC1
+  usecase "买点扫描\nPOST /api/t/scan-entry" as UC2
+  usecase "回本计划\nPOST /api/t/next-plan" as UC3
+  usecase "每日状态机\n定投→做T→平仓规则\n逐日记持仓/成本/现金流" as UC11
+  usecase "回本路径图\n成本线vs价格线 标回本点" as OUT1
+  usecase "8张统计卡 + 明细与快照(折叠)" as OUT2
+  usecase "8类条件扫描\n超跌/缩量企稳/反转/估值分位" as COND
+  usecase "候选股 + 理由 + 建议仓位" as OUT3
+  usecase "持有/补仓/做T/止损 + 触发条件" as OUT4
+}
+U --> UC1
+U --> UC2
+U --> UC3
+UC1 ..> UC11 : 定投补仓触发
+UC1 ..> OUT1 : 输出
+UC1 ..> OUT2 : 输出
+UC2 ..> COND : 条件
+UC2 ..> OUT3 : 输出
+UC3 ..> OUT4 : 输出
+note bottom
+  验收 TLabEngineTest 覆盖规格 9 个验收用例
+end note
+@enduml

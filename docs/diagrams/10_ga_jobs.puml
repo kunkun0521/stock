@@ -1,0 +1,26 @@
+@startuml 10_ga_jobs
+skinparam backgroundColor #FEFEFE
+title GA 每日作业链时序 (GaJobRunner)
+
+participant "定时器\n(17:30 交易日)" as timer
+participant "GaJobRunner\n(单线程+互斥锁)" as runner
+participant "FeatureService" as feat
+participant "PredictJob" as pred
+participant "VerifyJob" as verify
+participant "MetricService" as metric
+participant "PoolService" as pool
+database "ga_job_log" as log
+
+timer ->> runner : 触发日链路
+runner ->> feat : FeatureJob(增量)
+feat -->> log : SUCCESS/FAILED
+runner ->> pred : PredictJob\n(冠军+影子)
+pred -->> log : 写 ga_prediction
+runner ->> verify : VerifyJob\n(到期回填/VOID)
+verify -->> log : 更新 ga_prediction
+runner ->> metric : MetricJob\n(汇总/IC/衰减)
+metric -->> log : 写 ga_metric_daily
+runner ->> pool : PoolJob(周全量)
+pool -->> log : 更新 ga_stock_pool
+note over runner : 周六 02:00 另跑 EvolveJob\n(5周期 GA 进化→冠军准入)\n非交易日自动跳过\n前端「参数配置」页可手动触发
+@enduml

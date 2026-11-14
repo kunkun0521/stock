@@ -1,0 +1,35 @@
+@startuml 02_forecast_pipeline
+skinparam backgroundColor #FEFEFE
+title 模型预测：每日流水线（python -m predict.cli daily）
+
+start
+:读全池行情 (前复权);
+:特征工程 features;
+fork
+  :factor_score 线性因子模型
+  logit 逻辑回归;
+fork again
+  :rule 形态规则模型
+  (首日自动注册 champion);
+fork again
+  :lgbm / lgbm_rank
+  (LightGBM, 需安装);
+end fork
+:各模型给全市场打分\n(H∈{1,3,5,10,15,20});
+:写 prediction_run;
+if (到期回填?) then (是)
+  :用真实行情算实际涨跌\n写回结果;
+  :evaluate 计算 RankIC/命中率;
+  :按近期 RankIC 更新融合权重 model_weight\n(shadow 达标模型晋升 champion);
+else (否)
+endif
+:ensemble 融合选股 TopN;
+:Java /api/forecast 只读聚合;
+:前端「模型预测」页展示\n(RankIC趋势/权重/榜单);
+stop
+note right
+  shadow --days N:
+  对过去N天逐日假装预测再回填,
+  快速积累评估样本
+end note
+@enduml

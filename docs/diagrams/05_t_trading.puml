@@ -1,0 +1,30 @@
+@startuml 05_t_trading
+skinparam backgroundColor #FEFEFE
+title 做T模型：模拟状态机
+
+start
+:输入股票(中文/代码联想)\n底仓股数(默认1000)/成本价;
+:自动推定底仓成本\n(留空时按历史推算);
+:K线与日线指标\nMA/EMA/乖离率;
+repeat :逐交易日
+  :指标计算 TIndicatorUtil;
+  if (回踩均线且动能转正?) then (先买)
+    :低位买入(100股整数倍, T+1约束);
+  elseif (乖离率超阈值?) then (先卖)
+    :高位卖出底仓份额\n尾盘回补;
+  else (观望)
+  endif
+  :费用=佣金(max5,0.025%)+印花税0.05%(卖)+过户费0.001%;
+  :成本摊薄\n成本=(原成本×原股数+成交额+费用)/总股数;
+  if (触发目标/止损?) then (是)
+    :清仓, 成本线断开;
+    stop
+  else (否)
+  endif
+repeat while (还有交易日) is (是)
+:输出成本/市值双图 + 每日明细\n+ 8统计卡 + 风险提示;
+stop
+note right
+  前端: 参数保持, 点模拟不收起\n所有参数带悬停提示
+end note
+@enduml

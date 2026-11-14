@@ -148,3 +148,31 @@ level=error, text="近区间命中率 22.79% 低于 50%，模型可能退化，�
 页面里带 <kbd>?</kbd> 角标的英文指标（KPI、表头、任务名、参数键）点击后会跳转并高亮对应词条。
 术语表由前端 `src/ga/glossary.js` 维护，并通过 `GET /config`（**scope 必须为空串**才是全部作用域，
 传 `ALL` 会被当成真实作用域过滤成 0 行）实时补入 100+ 个 `paramKey` 的中文说明、当前值与默认值。
+
+### 6.5 数据体检与清理（CleanupJob / 数据清理页）
+
+新增「数据清理」页（前端 `src/ga/CleanupPage.jsx`）与后台任务 `CleanupJob`，用于三件事：
+1. **只读体检**：11 类脏数据条数、各表空间占用、按保留期算出的待删行数、受保护表清单；
+2. **修复**：把可判定的脏数据按业务口径幂等重算（命中判定 `is_correct`、未来日期因子 IC、倒挂冠军窗口、僵死 `RUNNING` 进化、负耗时任务日志）；
+3. **清理**：按配置保留期分批删除长期不用的历史数据。
+
+接口：
+
+| 方法 | 路径 | 说明 |
+| --- | --- | --- |
+| GET | `/cleanup/inspect` | 只读体检（脏数据 + 保留期预览 + 策略 + 表占用） |
+| GET | `/cleanup/policy` | 当前保留期策略与每层保护的实际取值 |
+| POST | `/cleanup/run` | 执行 `{mode: repair|purge|all, dryRun: true|false, confirm: true}` |
+| GET | `/cleanup/history` | 清理执行审计（`ga_cleanup_log`） |
+
+**安全约定**：
+- `dryRun=true`（默认）只统计不写库；真正删除必须同时 `dryRun=false` 且 `confirm=true`。
+- 定时任务（`stock.ga.cron-cleanup`，默认每周日 04:00）永远只走预览，仅把待清理规模写进任务日志，不删任何数据。
+- **白名单**：只有 `GaCleanupRepository.RULES` 常量列出的 11 张表可删；行情源表 `stock_daily_*`、配置表 `ga_config`、股票池状态 `ga_stock_pool`、当前冠军集 `ga_champion_set`、个体表现 `ga_individual_perf`、`stock_info`、`stock_score_daily` 永不在删除范围（见 `PROTECTED_TABLES`）。
+- **安全下限**：任何表都不得删除最近 `cleanup_min_keep_days`（默认 30）自然日的数据；特征缓存与行情缓存的下限更高（必须覆盖 GA 训练窗口 `feature_lookback_days` + 预热，详见 `GaCleanupService.effectiveDays`）。
+- **单次上限 / 分批**：`cleanup_max_rows`（默认 200000）、`cleanup_batch_size`（默认 5000），避免长事务锁表。
+- **保护 PENDING**：`cleanup_protect_pending=1`（默认）保护 `PENDING`（尚未回填）预测不被删除，避免永久丢失验证结果。
+
+**保留期默认天数**（`ga_config` 全局项，均可在「参数配置」页热改）：实盘预测 365 / 回放预测 120 / 特征缓存 600（实际下限 640）/ 行情缓存 600（实际下限 1100）/ 预汇总指标 365 / 因子 IC 365 / 任务日志 90 / 进化相关（run/generation_stat/individual）365 / 淘汰事件日志 365。
+
+**真实执行示例（2026-11-14）**：修复 109,221 行脏数据（其中 108,898 条历史 `VERIFIED` 因早期 `verify()` 投影缺失导致 `is_correct` 为 NULL，被排除出命中率分母，是「近区间命中率低于 50%」告警的根因；修复后近 20 日命中率回升至 ~55%）；删除 117,598 行过期特征（2025-02-11 之前，超出 GA 训练窗口、可重算）；随后重建指标 4,230 行、因子 IC 10 次、刷新股票池。所有写入均幂等，重复执行不会改动已正确数据。

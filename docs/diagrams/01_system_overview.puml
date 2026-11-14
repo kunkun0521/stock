@@ -1,0 +1,45 @@
+@startuml 01_system_overview
+skinparam backgroundColor #FEFEFE
+skinparam componentStyle rectangle
+title 系统总体架构
+
+actor 用户 as user
+package "前端 stock-web (React 19 + Vite + ECharts)" {
+  [市场看板 / 股票列表 / K线详情] as fe_market
+  [模型预测 / 短期预测] as fe_forecast
+  [量化评分 + 连续评分筛选] as fe_score
+  [做T模型 / 回本实验室] as fe_t
+  [GA 遗传算法预测看板] as fe_ga
+}
+package "Java 后端 stock (Spring Boot 4.1 / Java 21)" {
+  [行情/市场接口 /api/market /api/stocks] as be_market
+  [预测聚合 /api/forecast /api/short-term] as be_forecast
+  [量化评分 ScoreCalculation + 定时任务] as be_score
+  [做T/回本 TTrading / tlab] as be_t
+  [GA 系统 com.li.stock.ga] as be_ga
+}
+package "Python 引擎 stock-predict" {
+  [多模型训练/每日预测/回填/评估] as py_engine
+  [ga_bridge 只读 ga_* 对比报告] as py_bridge
+}
+database "MySQL stock_eastmoney" as db
+
+user --> fe_market
+user --> fe_forecast
+user --> fe_score
+user --> fe_t
+user --> fe_ga
+fe_market --> be_market
+fe_forecast --> be_forecast
+fe_score --> be_score
+fe_t --> be_t
+fe_ga --> be_ga
+be_market --> db
+be_forecast --> db
+be_score --> db
+be_t --> db
+be_ga --> db
+py_engine --> db : 读写 model_*/prediction_*
+py_bridge --> db : 只读 ga_*
+note bottom of be_ga : 统一响应 ApiResponse{code,message,data}\n所有计算前复权 adjustflag=2
+@enduml

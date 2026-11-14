@@ -1,0 +1,22 @@
+@startuml 07_kline_layout
+skinparam backgroundColor #FEFEFE
+title 股票详情页：K线与指标说明区
+
+rectangle "股票详情页 (总高约1226px)" {
+  rectangle "K线主体 560px\nECharts 三宫格\n(按容器高度动态分配)" as kline {
+    rectangle "K线+MA/EMA+BOLL" as g1
+    rectangle "成交量" as g2
+    rectangle "MACD/RSI/KDJ" as g3
+  }
+  rectangle "指标说明区 KlineIndicatorGuide\n按组: 趋势/动量/通道/能量\n限高滚动, 点击展开详细解释" as guide
+  rectangle "日线明细(默认折叠)\n紧凑字号" as daily
+}
+kline -[hidden]down- guide
+guide -[hidden]down- daily
+note right of kline
+  指标: MA5/10/20/60, EMA12/26,
+  MACD, BOLL(20,2), RSI, KDJ,
+  ATR, ADX, CCI, 年化波动率
+  涨=红 跌=绿
+end note
+@enduml

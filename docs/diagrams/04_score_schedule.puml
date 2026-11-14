@@ -1,0 +1,24 @@
+@startuml 04_score_schedule
+skinparam backgroundColor #FEFEFE
+title 量化评分：定时计算调度 (ScoreScheduledTask)
+
+start
+:应用启动;
+if (startup-enabled?) then (是)
+  :延迟3秒;
+  :补跑最近10个评分交易日\n(rebuild × 10, 互斥);
+else (否)
+endif
+:等待每日定时 21:30 (cron);
+if (今天是交易日?) then (是)
+  :重算最新交易日评分;
+  :写 ga/评分日志\n失败不中断下次调度;
+else (否)
+  :跳过;
+endif
+:页面手动入口\n「实时计算评分」/ 连续评分查询只读;
+stop
+note right
+  配置: application.yaml\nstock.score-schedule.*\n(开关/cron/补跑天数/延迟)
+end note
+@enduml

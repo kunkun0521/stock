@@ -1,0 +1,24 @@
+@startuml 03_score_pipeline
+skinparam backgroundColor #FEFEFE
+title 量化评分：日频横截面多因子打分
+
+start
+:确定评分日 asOf\n(默认最新交易日, 前复权);
+:加载近420自然日行情;
+:候选池过滤\n(收盘>0, 非停牌, 非ST, 有历史);
+:计算15个原始指标\n价值4/动量4/趋势3/风险2/流动性2;
+:收集全池各指标总体 population;
+repeat
+  :对某股票的某指标 x\n计算横截面分位\np(x)=(#{v<x}+0.5#{v=x})/N;
+  :低优指标翻转 1-p(x);
+repeat while (还有指标?) is (是)
+:因子分 F_k = 100×均值\n(缺失指标剔除出分母);
+:加权总分\nScore = 100×Σw_k(F_k/100)/Σw_k\nw=(0.25,0.30,0.15,0.20,0.10);
+:按总分排序写入 stock_score_daily\n(ON DUPLICATE KEY UPDATE 幂等);
+:前端排行 / 连续评分筛选页签;
+stop
+note right
+  数据边界严格截止 asOf,
+  不会把未来行情带入评分
+end note
+@enduml

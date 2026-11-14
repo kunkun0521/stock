@@ -1,0 +1,34 @@
+@startuml 09_ga_tables
+skinparam backgroundColor #FEFEFE
+title GA 数据表关系 (ER)
+
+entity "stock_daily_all\n(前复权日线)" as sda
+entity "stock_score_daily" as ssd
+entity "stock_feature_daily\n(58特征缓存)" as sfd
+entity "ga_market_daily\n(市场环境)" as gmd
+entity "ga_run\n(进化批次)" as gr
+entity "ga_generation_stat\n(逐代统计)" as ggs
+entity "ga_individual\n(个体/染色体JSON)" as gi
+entity "ga_champion_set\n(冠军版本)" as gcs
+entity "ga_prediction\n(CHAMPION/SHADOW预测)" as gp
+entity "ga_metric_daily\n(每日指标)" as gmet
+entity "ga_factor_ic_daily\n(因子IC)" as gfic
+entity "ga_stock_pool\n(股票池状态)" as gsp
+entity "ga_stock_elimination_log\n(淘汰日志)" as gsel
+entity "ga_job_log\n(任务日志)" as gjl
+entity "ga_config\n(104项配置)" as gc
+
+sda ||..|| sfd : "特征工程(截面标准化)"
+ssd ||..|| sfd : "评分派生特征\n(无则日线自算)"
+sda ||..|| gmd : "指数/市场宽度"
+sfd ||..|| gr : "训练样本"
+gr ||--|{ ggs
+gr ||--|{ gi
+gi ||--o{ gcs : "Hold-out复核通过"
+gcs ||--o{ gp : "冠军集成预测"
+gp ||..|| gmet : "到期回填汇总"
+sfd ||..|| gfic : "因子体检"
+gp ||..|| gsp : "in_pool标记"
+gsp ||--o{ gsel
+gjl -- gc
+@enduml

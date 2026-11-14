@@ -1,0 +1,45 @@
+@startuml 08_ga_architecture
+skinparam backgroundColor #FEFEFE
+skinparam componentStyle rectangle
+title GA 遗传算法预测系统架构 (com.li.stock.ga)
+
+package "数据层" {
+  [GaDataRepository\n读 stock_daily_all / stock_score_daily\n写 stock_feature_daily / ga_market_daily] as repo_data
+  [GaStoreRepository\nga_* 13张表读写] as repo_store
+  [GaConfig\n104项可热更新配置] as cfg
+}
+package "计算层" {
+  [FeatureService\n58特征/日+截面标准化+质检] as feat
+  [LabelBuilder\nret_h三分类/停牌顺延/EXCESS] as label
+  [GaEngine\nwalk-forward+purge+Hold-out\n锦标赛/BLX-α/变异/移民/HOF] as engine
+  [ChampionService\n准入/softmax集成/Platt校准] as champ
+  [PredictionService\n每日预测/到期回填/回放] as pred
+  [MetricService\nga_metric_daily/因子IC/衰减] as metric
+  [PoolService\n8类淘汰/复活/override] as pool
+}
+package "接口与调度层" {
+  [GaController\n/api/ga/** 30+接口+CSV] as api
+  [GaJobRunner\n7任务/互斥/日志] as jobs
+  [GaSchemaInitializer\n幂等建表] as init
+}
+[前端 src/ga/\n8个子页看板] as fe
+[Python ga_bridge.py\n只读对比报告] as pyb
+
+repo_data <-down- feat
+repo_store <-down- engine
+cfg <.. feat
+cfg <.. engine
+engine <-right- label
+champ <-down- engine
+pred <-down- champ
+metric <-down- pred
+pool <-down- metric
+api <-down- metric
+api <-down- pool
+jobs <-down- feat
+jobs <-down- pred
+jobs <-down- engine
+init ..> repo_store : 启动建表
+fe --> api
+pyb ..> repo_store
+@enduml

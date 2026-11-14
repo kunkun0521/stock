@@ -277,10 +277,12 @@ public class GaQueryService {
 
     public Map<String, Object> reliability(int h, LocalDate from, LocalDate to) {
         int bins = Math.max(5, config.globalInt("ece_bins"));
+        // 只投影分箱需要的两列（prob_up / actual_return），配合覆盖索引 idx_ga_pred_rel
+        // 避免把 explain_json 等大字段拉进堆；分箱在 JVM 内完成（原逻辑）。
         List<Map<String, Object>> rows = jdbc.queryForList("SELECT `prob_up` p, "
                 + "CASE WHEN `actual_return`>0 THEN 1 ELSE 0 END y FROM `ga_prediction` "
-                + "WHERE `status`='VERIFIED' AND `horizon`=? AND `trade_date` BETWEEN ? AND ?",
-                h, Date.valueOf(from), Date.valueOf(to));
+                + "WHERE `status`='VERIFIED' AND `horizon`=? AND `trade_date` BETWEEN ? AND ? "
+                + "AND `prob_up` IS NOT NULL", h, Date.valueOf(from), Date.valueOf(to));
         double[] sumP = new double[bins], sumY = new double[bins];
         int[] n = new int[bins];
         for (Map<String, Object> r : rows) {
@@ -326,7 +328,9 @@ public class GaQueryService {
 
     public Map<String, Object> quantile(int h, LocalDate from, LocalDate to) {
         int groups = Math.max(2, config.globalInt("quantile_groups"));
-        List<Map<String, Object>> rows = jdbc.queryForList("SELECT `trade_date`,`code`,`prob_up`,`actual_return` "
+        // 只投影 trade_date/prob_up/actual_return 三列（配合覆盖索引 idx_ga_pred_qt），
+        // 分箱在 JVM 内按原逻辑完成：按 trade_date 分组、组内按 prob_up 升序、不足 groups 行跳过。
+        List<Map<String, Object>> rows = jdbc.queryForList("SELECT `trade_date`,`prob_up`,`actual_return` "
                 + "FROM `ga_prediction` WHERE `status`='VERIFIED' AND `horizon`=? "
                 + "AND `trade_date` BETWEEN ? AND ? ORDER BY `trade_date`,`prob_up`",
                 h, Date.valueOf(from), Date.valueOf(to));

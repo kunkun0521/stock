@@ -5,6 +5,7 @@ import com.li.stock.ga.cleanup.GaCleanupService;
 import com.li.stock.ga.config.GaConfig;
 import com.li.stock.ga.job.GaJobRunner;
 import com.li.stock.ga.metric.GaQueryService;
+import com.li.stock.ga.metric.GaQueryCache;
 import com.li.stock.ga.pool.PoolService;
 import com.li.stock.ga.predict.ChampionService;
 import com.li.stock.ga.repository.GaStoreRepository;
@@ -57,6 +58,7 @@ public class GaController {
     private final ChampionService champions;
     private final PoolService pool;
     private final GaCleanupService cleanup;
+    private final GaQueryCache cache;
 
     @Value("${stock.ga.cron-daily:0 30 17 * * ?}")
     private String cronDaily;
@@ -69,7 +71,7 @@ public class GaController {
 
     public GaController(GaQueryService query, GaStoreRepository store, GaConfig config,
                         GaJobRunner jobs, ChampionService champions, PoolService pool,
-                        GaCleanupService cleanup) {
+                        GaCleanupService cleanup, GaQueryCache cache) {
         this.query = query;
         this.store = store;
         this.config = config;
@@ -77,6 +79,7 @@ public class GaController {
         this.champions = champions;
         this.pool = pool;
         this.cleanup = cleanup;
+        this.cache = cache;
     }
 
     // ================================================================== 总览
@@ -91,8 +94,10 @@ public class GaController {
             @RequestParam(required = false) String includeReplay) {
         LocalDate toD = date(to, LocalDate.now());
         LocalDate fromD = date(from, toD.minusDays(60));
-        return ApiResponse.ok(query.overview(horizon, fromD, toD, boards(board),
-                bool(strict, false), bool(includeReplay, false)));
+        String key = "overview:" + horizon + ":" + fromD + ":" + toD + ":" + String.join(",", boards(board))
+                + ":" + bool(strict, false) + ":" + bool(includeReplay, false);
+        return ApiResponse.ok(cache.get(key, () ->
+                query.overview(horizon, fromD, toD, boards(board), bool(strict, false), bool(includeReplay, false))));
     }
 
     @GetMapping("/overview/trend")
@@ -131,9 +136,12 @@ public class GaController {
             @RequestParam(required = false) String strict,
             @RequestParam(required = false, defaultValue = "1") int page,
             @RequestParam(required = false, defaultValue = "20") int size) {
-        return ApiResponse.ok(store.listPredictions(predQuery(from, to, horizon, direction, result, board,
-                minConf, maxConf, inPool, sort, keyword, includeReplay, strict),
-                Math.max(1, page), Math.min(200, Math.max(1, size))));
+        Map<String, String> q = predQuery(from, to, horizon, direction, result, board,
+                minConf, maxConf, inPool, sort, keyword, includeReplay, strict);
+        int p = Math.max(1, page);
+        int s = Math.min(200, Math.max(1, size));
+        String key = "predictions:" + q + ":" + p + ":" + s;
+        return ApiResponse.ok(cache.get(key, () -> store.listPredictions(q, p, s)));
     }
 
     /** CSV 直链导出：不经过 client.js（它会按 JSON 解析），带 BOM 方便 Excel 直接打开。 */
@@ -198,7 +206,10 @@ public class GaController {
             @RequestParam(required = false, defaultValue = "vol") String dim,
             @RequestParam(required = false) String from,
             @RequestParam(required = false) String to) {
-        return ApiResponse.ok(query.buckets(horizon, dim, rangeFrom(from, to), date(to, LocalDate.now())));
+        LocalDate fromD = rangeFrom(from, to);
+        LocalDate toD = date(to, LocalDate.now());
+        String key = "buckets:" + horizon + ":" + dim + ":" + fromD + ":" + toD;
+        return ApiResponse.ok(cache.get(key, () -> query.buckets(horizon, dim, fromD, toD)));
     }
 
     @GetMapping("/analysis/reliability")
@@ -206,7 +217,11 @@ public class GaController {
             @RequestParam(required = false, defaultValue = "5") int horizon,
             @RequestParam(required = false) String from,
             @RequestParam(required = false) String to) {
-        return ApiResponse.ok(query.reliability(horizon, rangeFrom(from, to), date(to, LocalDate.now())));
+        LocalDate fromD = rangeFrom(from, to);
+        LocalDate toD = date(to, LocalDate.now());
+        String key = "reliability:" + horizon + ":" + fromD + ":" + toD;
+        // 需读数十万行 prob_up/actual_return 做分箱，数据每日一变，缓存 30 秒
+        return ApiResponse.ok(cache.get(key, 30, () -> query.reliability(horizon, fromD, toD)));
     }
 
     @GetMapping("/analysis/confusion")
@@ -214,14 +229,20 @@ public class GaController {
             @RequestParam(required = false, defaultValue = "5") int horizon,
             @RequestParam(required = false) String from,
             @RequestParam(required = false) String to) {
-        return ApiResponse.ok(query.confusion(horizon, rangeFrom(from, to), date(to, LocalDate.now())));
+        LocalDate fromD = rangeFrom(from, to);
+        LocalDate toD = date(to, LocalDate.now());
+        String key = "confusion:" + horizon + ":" + fromD + ":" + toD;
+        return ApiResponse.ok(cache.get(key, () -> query.confusion(horizon, fromD, toD)));
     }
 
     @GetMapping("/analysis/top-errors")
     public ApiResponse<List<Map<String, Object>>> topErrors(
             @RequestParam(required = false, defaultValue = "5") int horizon,
             @RequestParam(required = false, defaultValue = "20") int topN) {
-        return ApiResponse.ok(query.topErrors(horizon, topN));
+        String key = "topErrors:" + horizon + ":" + topN;
+        // 该查询需对数十万行按 ABS(actual_return) 全局排序，无法用索引；
+        // 数据只在每日 VerifyJob 后变化，给 60 秒缓存，避免反复触发全量排序。
+        return ApiResponse.ok(cache.get(key, 60, () -> query.topErrors(horizon, topN)));
     }
 
     @GetMapping("/analysis/quantile")
@@ -229,7 +250,11 @@ public class GaController {
             @RequestParam(required = false, defaultValue = "5") int horizon,
             @RequestParam(required = false) String from,
             @RequestParam(required = false) String to) {
-        return ApiResponse.ok(query.quantile(horizon, rangeFrom(from, to), date(to, LocalDate.now())));
+        LocalDate fromD = rangeFrom(from, to);
+        LocalDate toD = date(to, LocalDate.now());
+        String key = "quantile:" + horizon + ":" + fromD + ":" + toD;
+        // 需按 trade_date/prob_up 对数十万行排序分箱，数据每日一变，缓存 30 秒
+        return ApiResponse.ok(cache.get(key, 30, () -> query.quantile(horizon, fromD, toD)));
     }
 
     // ================================================================== 淘汰管理

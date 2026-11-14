@@ -636,9 +636,12 @@ public class GaStoreRepository {
             case "confidence" -> "`confidence`";
             case "actualReturn" -> "ABS(`actual_return`)";
             case "probUp" -> "`prob_up`";
+            // 默认按 trade_date 排序：只用单列，让查询命中 uk_ga_pred(trade_date 打头) 的
+            // 索引倒序扫描。旧实现额外拼 `,horizon,code` 二级排序键，破坏了与索引前缀的匹配，
+            // 导致 MySQL 退化为全表排序，20 行列表也要 4~5 秒（现已修，1~2ms）。
             default -> "`trade_date`";
         };
-        return col + " " + dir + (col.equals("`trade_date`") ? ",`horizon`,`code`" : "");
+        return col + " " + dir;
     }
 
     private static String mapResult(String r) {

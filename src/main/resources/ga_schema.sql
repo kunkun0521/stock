@@ -210,7 +210,16 @@ CREATE TABLE IF NOT EXISTS `ga_prediction` (
   UNIQUE KEY `uk_ga_pred` (`trade_date`, `code`, `market`, `adjustflag`, `horizon`, `model_role`, `is_replay`),
   KEY `idx_ga_pred_status` (`horizon`, `status`, `trade_date`),
   KEY `idx_ga_pred_code` (`code`, `market`, `trade_date`),
-  KEY `idx_ga_pred_target` (`target_date`)
+  KEY `idx_ga_pred_target` (`target_date`),
+  -- 性能：覆盖索引，让看板/错误分析高频聚合纯走二级索引不回表（表 259 万行）。
+  -- overview 主聚合：等值列 + trade_date 范围 + 聚合列 is_correct/pred_direction/confidence
+  KEY `idx_ga_pred_ov` (`status`, `model_role`, `in_pool`, `is_replay`, `trade_date`, `is_correct`, `pred_direction`, `confidence`),
+  -- 错误分析 confusion：pred_direction/actual_return 分组列覆盖
+  KEY `idx_ga_pred_conf` (`status`, `horizon`, `trade_date`, `pred_direction`, `actual_return`),
+  -- 错误分析 buckets（默认按 vol_20 分箱）：vol_20 分组列 + is_correct 聚合列覆盖
+  KEY `idx_ga_pred_bkt` (`status`, `horizon`, `trade_date`, `pred_direction`, `vol_20`, `is_correct`),
+  -- 错误分析 reliability/quantile：prob_up/actual_return 覆盖，分箱在 JVM 内完成
+  KEY `idx_ga_pred_rel` (`status`, `horizon`, `trade_date`, `prob_up`, `actual_return`)
 ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COMMENT='预测与到期回填，复盘主数据源';
 
 CREATE TABLE IF NOT EXISTS `ga_metric_daily` (

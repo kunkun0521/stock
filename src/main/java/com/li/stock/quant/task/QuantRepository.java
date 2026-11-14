@@ -36,12 +36,12 @@ public class QuantRepository {
     private static final Logger log = LoggerFactory.getLogger(QuantRepository.class);
     private static final DateTimeFormatter TS = DateTimeFormatter.ofPattern("yyyy-MM-dd HH:mm:ss");
 
-    private final JdbcTemplate jdbc;
-    private final ObjectMapper json;
+    private static final ObjectMapper JSON = new ObjectMapper();
 
-    public QuantRepository(JdbcTemplate jdbc, ObjectMapper json) {
+    private final JdbcTemplate jdbc;
+
+    public QuantRepository(JdbcTemplate jdbc) {
         this.jdbc = jdbc;
-        this.json = json;
     }
 
     // ------------------------------------------------------------------ 任务
@@ -415,7 +415,7 @@ public class QuantRepository {
 
     public String toJson(Object o) {
         try {
-            return json.writeValueAsString(o);
+            return JSON.writeValueAsString(o);
         } catch (Exception e) {
             log.warn("JSON 序列化失败：{}", e.getMessage());
             return "{}";
@@ -426,7 +426,7 @@ public class QuantRepository {
     public Map<String, Object> parseJson(String s) {
         if (s == null || s.isBlank()) return new LinkedHashMap<>();
         try {
-            Object o = json.readValue(s, Object.class);
+            Object o = JSON.readValue(s, Object.class);
             return o instanceof Map<?, ?> m ? (Map<String, Object>) m : new LinkedHashMap<>();
         } catch (Exception e) {
             return new LinkedHashMap<>();

@@ -126,10 +126,10 @@ public class R2MaMacd extends AbstractStrategy {
                 boolean aboveZero = ok(macd.dif()[row]) && macd.dif()[row] > 0;
                 boolean strong = rankRow != null && !Float.isNaN(rankRow[row]) && rankRow[row] >= rocMin;
 
+                sig.trailPct[row] = (float) trailPct;   // 引擎按持仓最高收盘价滚动更新
                 if (bullStack && longUp && crossed && aboveZero && strong) {
                     sig.entry[row] = true;
                     sig.stopPct[row] = (float) stopLoss;
-                    sig.trailPct[row] = (float) trailPct;
                     a[row] = rankRow[row];
                     b[row] = (float) macd.hist()[row];
                     c[row] = ok(ma20Slope[row]) ? (float) ma20Slope[row] : Float.NaN;

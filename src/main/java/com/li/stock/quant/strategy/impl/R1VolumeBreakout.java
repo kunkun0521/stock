@@ -42,14 +42,16 @@ public class R1VolumeBreakout extends AbstractStrategy {
                 ParamDef.decP("atrStopMul", "ATR 止损倍数", 2, 0.5, 5, 0.1, "入场价 - 倍数 × ATR"),
                 ParamDef.decP("hardStopPct", "硬止损(%)", 10, 3, 30, 0.5, "相对买入价"),
                 ParamDef.decP("atrTrailMul", "ATR 移动止盈倍数", 2.5, 0.5, 6, 0.1, "最高收盘 - 倍数 × ATR"),
-                ParamDef.intP("exitMaN", "出场均线(日)", 20, 5, 60, "连续 2 日跌破离场")
+                ParamDef.intP("exitMaN", "出场均线(日)", 20, 5, 60, "连续 2 日跌破离场"),
+                ParamDef.intP("falseBreakDays", "假突破保护(日)", 3, 0, 10, "买入后 N 日内跌破突破位即离场")
         );
     }
 
     @Override
     public Map<String, Object> defaults() {
         return params("breakN", 20, "volMul", 1.5, "volN", 20, "trendN", 60, "maxBias", 15d,
-                "atrN", 14, "atrStopMul", 2d, "hardStopPct", 10d, "atrTrailMul", 2.5, "exitMaN", 20);
+                "atrN", 14, "atrStopMul", 2d, "hardStopPct", 10d, "atrTrailMul", 2.5, "exitMaN", 20,
+                "falseBreakDays", 3);
     }
 
     @Override
@@ -105,13 +107,15 @@ public class R1VolumeBreakout extends AbstractStrategy {
                 boolean trend = ok(maTrend[row]) && s.close[row] > maTrend[row];
                 boolean biasOk = !ok(bias[row]) || bias[row] <= maxBias;
 
+                // 移动止盈幅度逐日给出（引擎按持仓期最高收盘价滚动抬高，只上不下）
+                if (ok(atr[row])) sig.trailOffset[row] = (float) (atrTrail * atr[row]);
                 if (breakout && volumeUp && trend && biasOk) {
                     sig.entry[row] = true;
                     sig.stopPct[row] = (float) hardStop;
+                    sig.breakLevel[row] = (float) hhvPrev[row];
                     if (ok(atr[row])) {
                         sig.stopPrice[row] = (float) Math.max(s.close[row] - atrStopMul * atr[row],
                                 s.close[row] * (1 - hardStop / 100));
-                        sig.trailOffset[row] = (float) (atrTrail * atr[row]);
                     }
                     a[row] = (float) (s.close[row] / hhvPrev[row] - 1);
                     b[row] = (float) vr;
@@ -124,9 +128,7 @@ public class R1VolumeBreakout extends AbstractStrategy {
                     }
                 }
 
-                if (ok(hhvPrev[row]) && s.close[row] < hhvPrev[row]) {
-                    sig.markExit(row, "跌回突破位");
-                } else if (belowForDays(s.close, maExit, row, 2)) {
+                if (belowForDays(s.close, maExit, row, 2)) {
                     sig.markExit(row, "连续 2 日跌破 MA" + exitMaN);
                 }
             }

@@ -120,14 +120,14 @@ public final class Performance {
         double profitFactor = sumLoss != 0 ? Math.abs(sumWin / sumLoss) : (sumWin > 0 ? 99 : 0);
         double expectancy = tradeCount > 0 ? (sumWin + sumLoss) / tradeCount : 0;
 
-        double avgNav = 0;
+        double avgEquity = 0;
         double posSum = 0;
         for (EquityPoint p : points) {
-            avgNav += p.nav();
+            avgEquity += p.cash() + p.positionValue();
             posSum += p.positionCount();
         }
-        avgNav = avgNav / n * navStart;
-        double turnover = avgNav > 0 && years > 0 ? turnoverAmount / avgNav / years : 0;
+        avgEquity = avgEquity / n;
+        double turnover = avgEquity > 0 && years > 0 ? turnoverAmount / avgEquity / years : 0;
 
         m.put("totalReturn", totalReturn);
         m.put("annualReturn", annualReturn);

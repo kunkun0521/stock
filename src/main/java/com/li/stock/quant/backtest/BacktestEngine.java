@@ -45,7 +45,7 @@ public final class BacktestEngine {
     }
 
     public Outcome run(MarketPanel panel, BacktestConfig cfg, Universe universe,
-                       List<SignalSeries> signals, int maxHoldDays,
+                       List<SignalSeries> signals, int maxHoldDays, int falseBreakDays,
                        Progress progress, BooleanSupplier cancelled) {
         int startIdx = resolveStart(panel, cfg.start());
         int endIdx = resolveEnd(panel, cfg.end());
@@ -126,11 +126,18 @@ public final class BacktestEngine {
                 int row = MarketPanel.rowOf(packed);
                 SignalSeries sig = byStock[si];
                 if (sig == null) continue;
+                MarketPanel.Stock s = stocks[si];
 
                 Position holding = positions.get(si);
                 if (holding != null) {
                     if (sig.exit[row] && !pendingSell.containsKey(si)) {
                         pendingSell.put(si, sig.exitReason[row] == null ? "信号出场" : sig.exitReason[row]);
+                    }
+                    // 假突破保护：买入后 N 个交易日内收盘跌破突破位，次日开盘离场
+                    if (falseBreakDays > 0 && !pendingSell.containsKey(si)
+                            && holding.holdDays <= falseBreakDays && holding.breakLevel > 0
+                            && s.close[row] < holding.breakLevel) {
+                        pendingSell.put(si, "假突破（跌回 " + String.format("%.2f", holding.breakLevel) + "）");
                     }
                     continue;
                 }
@@ -310,6 +317,8 @@ public final class BacktestEngine {
             stop = stop <= 0 ? abs : Math.max(stop, abs);
         }
         pos.stopPrice = stop;
+        float level = sig.breakLevel[signalRow];
+        pos.breakLevel = Float.isNaN(level) ? 0 : level;
     }
 
     private double executeStops(MarketPanel panel, BacktestConfig cfg, Map<Integer, Position> positions,
@@ -417,6 +426,7 @@ public final class BacktestEngine {
         double lastClose;
         double highestClose;
         double stopPrice;
+        double breakLevel;
         double trailStop;
         int holdDays;
         double mae;

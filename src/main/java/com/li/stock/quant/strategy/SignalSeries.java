@@ -22,6 +22,8 @@ public final class SignalSeries {
     public final float[] trailOffset;
     /** 移动止盈回撤百分比（相对持仓期最高收盘价），0 表示不启用。 */
     public final float[] trailPct;
+    /** 假突破参考位（如突破前的 N 日高点），引擎在买入后若干日内跌破该位即离场；NaN 表示不启用。 */
+    public final float[] breakLevel;
     /** 触发条件明细，仅 explain 模式下填充，否则为 null。 */
     public final String[] detail;
 
@@ -35,6 +37,8 @@ public final class SignalSeries {
         this.stopPct = new float[rows];
         this.trailOffset = new float[rows];
         this.trailPct = new float[rows];
+        this.breakLevel = new float[rows];
+        java.util.Arrays.fill(breakLevel, Float.NaN);
         this.detail = explain ? new String[rows] : null;
         java.util.Arrays.fill(stopPrice, Float.NaN);
     }

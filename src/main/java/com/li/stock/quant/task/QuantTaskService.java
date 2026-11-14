@@ -159,8 +159,9 @@ public class QuantTaskService {
             progress(id, 52, "执行回测撮合");
 
             int maxHold = intOf(params.get("maxHoldDays"), 0);
+            int falseBreak = intOf(params.get("falseBreakDays"), 0);
             BacktestEngine engine = new BacktestEngine();
-            BacktestEngine.Outcome outcome = engine.run(panel, runCfg, universe, signals, maxHold,
+            BacktestEngine.Outcome outcome = engine.run(panel, runCfg, universe, signals, maxHold, falseBreak,
                     (p, s) -> progress(id, p, s),
                     () -> cancels.getOrDefault(id, new AtomicBoolean(false)).get());
 
@@ -330,7 +331,12 @@ public class QuantTaskService {
                 item.put("board", s.board);
                 item.put("score", sig.score[row]);
                 item.put("closePrice", s.close[row]);
-                item.put("stopPrice", Float.isNaN(sig.stopPrice[row]) ? null : sig.stopPrice[row]);
+                // 建议止损价：优先用策略给出的绝对价，否则按固定止损百分比从收盘价推算
+                float stop = sig.stopPrice[row];
+                if (Float.isNaN(stop) && sig.stopPct[row] > 0) {
+                    stop = s.close[row] * (1 - sig.stopPct[row] / 100);
+                }
+                if (!Float.isNaN(stop)) item.put("stopPrice", Math.round(stop * 100) / 100d);
                 Map<String, Object> detail = new LinkedHashMap<>();
                 detail.put("text", sig.detail == null ? "" : sig.detail[row]);
                 item.put("detail", detail);

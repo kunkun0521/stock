@@ -57,6 +57,39 @@ class GaCoreAcceptanceTest {
         assertNull(LabelBuilder.targetDate(tradable, LocalDate.of(2026, 1, 5), 5));
     }
 
+    /** 缩尾 z-score：缺失样本必须保持 0，且不得参与均值/标准差计算。 */
+    @Test
+    void winsorizeZKeepsMissingSamplesAtZero() {
+        double[] v = {1.0, 2.0, 3.0, 4.0, 999.0};
+        boolean[] valid = {true, true, true, true, false};
+        float[] out = new float[v.length];
+        assertFalse(GaMath.winsorizeZ(v, valid, 0.01, 0.5, out));
+        assertEquals(0f, out[4], 1e-6, "缺失值必须按截面均值 0 处理，不能得到 -m/sd 的虚假 z 值");
+        double mean = 0;
+        for (int i = 0; i < 4; i++) mean += out[i];
+        assertTrue(Math.abs(mean) < 1e-4, "有效样本的 z 值之和应为 0");
+    }
+
+    /** NaN 输入不得污染相关/激活/权重计算。 */
+    @Test
+    void nanInputsDoNotPoisonMath() {
+        assertEquals(0.5, GaMath.sigmoid(Double.NaN), 1e-9);
+        assertTrue(Double.isFinite(GaMath.pearson(new double[]{1, Double.NaN, 3}, new double[]{2, 5, 4})));
+        double[] w = GaMath.softmax(new double[]{Double.NaN, Double.NaN}, 0.1);
+        assertEquals(0.5, w[0], 1e-9, "全 NaN 时退化为均匀权重");
+        assertEquals(1.0, w[0] + w[1], 1e-9);
+    }
+
+    /** 染色体解析失败时按个体 id 派生种子，批量失败不会得到完全相同的基因型。 */
+    @Test
+    void parseIndividualFailureUsesDistinctSeeds() {
+        int n = FeatureKeys.N;
+        Individual a = GaEngine.parseIndividual(Map.of("chromosomeJson", "BROKEN", "individualId", 1L), n, 3);
+        Individual b = GaEngine.parseIndividual(Map.of("chromosomeJson", "BROKEN", "individualId", 2L), n, 3);
+        assertFalse(java.util.Arrays.equals(a.w, b.w), "不同个体解析失败时基因型不应完全相同");
+        assertTrue(a.active() >= 3);
+    }
+
     /** 用例 3：染色体 JSON 可还原，且至少激活 minActive 个特征。 */
     @Test
     void chromosomeRoundTripKeepsAtLeastThreeActiveFeatures() {

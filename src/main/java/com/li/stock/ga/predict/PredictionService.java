@@ -63,6 +63,7 @@ public class PredictionService {
         for (List<Bar> bars : data.loadBarsWithScores(flag, t, t).values()) {
             for (Bar b : bars) snapshots.put(GaDataRepository.key(b.code(), b.market()), b);
         }
+        Map<String, Double> amountMa20 = data.amountMa20(flag, t);
         Map<String, Object> pool = store.poolStates();
         Map<String, Object> market = marketOf(t, flag);
         List<String> log = new ArrayList<>();
@@ -71,7 +72,7 @@ public class PredictionService {
             ChampionService.Ensemble ens = champions.ensemble(h);
             if (ens.members().isEmpty()) { log.add("H" + h + " 无冠军集"); continue; }
             List<Object[]> rows = buildRows(t, h, flag, "CHAMPION", isReplay, vecs, snapshots,
-                    pool, market, ens, ens.versionTag());
+                    pool, market, amountMa20, ens, ens.versionTag());
             int n = store.replacePendingPredictions(t, h, "CHAMPION", isReplay, rows);
             log.add("H" + h + " 主榜 " + n + " 条");
 
@@ -79,7 +80,7 @@ public class PredictionService {
                 ChampionService.Ensemble shadowEns = shadowEnsemble(h);
                 if (!shadowEns.members().isEmpty()) {
                     List<Object[]> srows = buildRows(t, h, flag, "SHADOW", isReplay, vecs, snapshots,
-                            pool, market, shadowEns, "SHADOW-" + h);
+                            pool, market, amountMa20, shadowEns, "SHADOW-" + h);
                     int sn = store.replacePendingPredictions(t, h, "SHADOW", isReplay, srows);
                     log.add("H" + h + " 影子 " + sn + " 条");
                 }
@@ -91,6 +92,7 @@ public class PredictionService {
     private List<Object[]> buildRows(LocalDate t, int h, int flag, String role, int isReplay,
                                      List<FeatureService.Vec> vecs, Map<String, Bar> snapshots,
                                      Map<String, Object> pool, Map<String, Object> market,
+                                     Map<String, Double> amountMa20,
                                      ChampionService.Ensemble ens, String version) {
         List<Object[]> rows = new ArrayList<>();
         for (FeatureService.Vec v : vecs) {
@@ -113,7 +115,10 @@ public class PredictionService {
                     Date.valueOf(t), v.code(), v.market(), flag, h, role, isReplay, inPool ? 1 : 0,
                     version, s.direction(), num(s.pCal()), num(s.confidence()), num(s.scoreRaw()),
                     b == null ? null : num(b.close()), v.limitFlag(), b == null ? 0 : b.isSt(),
-                    num(v.vol20()), b == null ? null : num(b.amount()), b == null ? null : num(b.peTtm()),
+                    num(v.vol20()),
+                    // amount_ma_20 存 20 日均额（错误分析按此分桶），当日额只在缓存缺失时兜底
+                    num(amountMa20.getOrDefault(key, b == null ? Double.NaN : b.amount())),
+                    b == null ? null : num(b.peTtm()),
                     market.getOrDefault("regime", 2), explain});
         }
         return rows;

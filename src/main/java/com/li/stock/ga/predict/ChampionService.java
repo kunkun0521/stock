@@ -133,14 +133,16 @@ public class ChampionService {
             if (picked.size() >= k) break;
         }
 
-        // Hold-out 集成 BalAcc
+        // Hold-out 集成 BalAcc：候选与现任冠军共用同一批已加载的特征/标签，避免重复加载全市场行情
         Map<String, Object> run = store.runById(runId);
-        double holdBalacc = holdoutBalacc(h, asOf, picked, run);
-        boolean hasChampion = !store.currentChampions(h).isEmpty();
+        List<Map<String, Object>> current = store.currentChampions(h);
+        HoldoutContext ctx = holdoutContext(h, asOf, run);
+        double holdBalacc = ctx == null ? 0 : holdoutBalacc(h, picked, ctx);
+        boolean hasChampion = !current.isEmpty();
         double need = hasChampion ? config.getDouble(h, "holdout_min_balacc")
                 : config.getDouble(h, "holdout_min_first");
-        double currentHold = hasChampion ? holdBalacc : 0; // 现任冠军同段比较见下
-        if (holdBalacc < need || (hasChampion && holdBalacc + 1e-9 < currentChampionHoldout(h, asOf, run))) {
+        double currentHold = (hasChampion && ctx != null) ? holdoutBalacc(h, current, ctx) : 0;
+        if (holdBalacc < need || (hasChampion && holdBalacc + 1e-9 < currentHold)) {
             for (Map<String, Object> row : picked) {
                 long id = ((Number) row.get("individualId")).longValue();
                 store.setIndividualStatus(id, "REJECTED", "HOLDOUT_FAIL");
@@ -162,35 +164,39 @@ public class ChampionService {
                 picked.size(), holdBalacc, config.getInt(h, "shadow_days"));
     }
 
-    private double currentChampionHoldout(int h, LocalDate asOf, Map<String, Object> run) {
-        // 现任冠军在同一 Hold-out 段的 BalAcc；没有已验证实盘样本时退化为 0（首次即等于候选门槛）
-        return 0;
-    }
+    /** Hold-out 评估上下文：特征、标签与周期参数只加载一次，供候选与现任冠军分别打分。 */
+    private record HoldoutContext(Map<LocalDate, List<FeatureService.Vec>> normalized,
+                                  Map<String, Label> labelIndex) {}
 
-    private double holdoutBalacc(int h, LocalDate asOf, List<Map<String, Object>> candidates,
-                                 Map<String, Object> run) {
+    private HoldoutContext holdoutContext(int h, LocalDate asOf, Map<String, Object> run) {
         Object hs = run.get("holdoutStart"), he = run.get("holdoutEnd");
-        if (hs == null || he == null) return 0;
+        if (hs == null || he == null) return null;
         LocalDate from = LocalDate.parse(String.valueOf(hs).substring(0, 10));
         LocalDate to = LocalDate.parse(String.valueOf(he).substring(0, 10));
-        if (to.isBefore(from)) return 0;
+        if (to.isBefore(from)) return null;
         int flag = config.globalInt("adjust_flag");
         Map<LocalDate, List<FeatureService.Vec>> normalized = features.loadNormalized(flag, from, to);
-        Map<String, List<Bar>> bars = data.loadBarsWithScores(flag, from.minusDays(400), to.plusDays(30));
-        Map<String, Label> labelIndex = labels.build(h, bars, from, to);
+        // 到期日只需 h 个交易日之后的行情，不再多加载 30 天（也避免把未来数据带进标签）
+        Map<String, List<Bar>> bars = data.loadBarsWithScores(flag, from.minusDays(400), to.plusDays(h * 2L + 10));
+        return new HoldoutContext(normalized, labels.build(h, bars, from, to));
+    }
+
+    private double holdoutBalacc(int h, List<Map<String, Object>> candidates, HoldoutContext ctx) {
+        if (ctx == null || candidates.isEmpty()) return 0;
         List<Individual> inds = candidates.stream()
                 .map(r -> GaEngine.parseIndividual(r, FeatureKeys.N, config.getInt(h, "min_active_features")))
                 .toList();
+        // 权重用落库的真实 F（parseIndividual 已还原 fitness），与 admit 写入的 shadow_weight 一致
         double[] weights = GaMath.softmax(inds.stream().mapToDouble(i -> i.fitness.f()).toArray(),
                 config.getDouble(h, "softmax_temp"));
         double delta = 0;
         for (int i = 0; i < inds.size(); i++) delta += weights[i] * inds.get(i).delta;
 
         int tp = 0, tn = 0, fp = 0, fn = 0;
-        for (Map.Entry<LocalDate, List<FeatureService.Vec>> e : normalized.entrySet()) {
+        for (Map.Entry<LocalDate, List<FeatureService.Vec>> e : ctx.normalized().entrySet()) {
             for (FeatureService.Vec v : e.getValue()) {
                 if (!v.valid()) continue;
-                Label lab = labelIndex.get(v.code() + "|" + v.market() + "|" + e.getKey());
+                Label lab = ctx.labelIndex().get(v.code() + "|" + v.market() + "|" + e.getKey());
                 if (lab == null || lab.noise()) continue;
                 double p = 0;
                 for (int i = 0; i < inds.size(); i++) {
@@ -222,15 +228,18 @@ public class ChampionService {
 
         List<Map<String, Object>> candidates = store.candidateIndividuals(h);
         if (candidates.isEmpty()) return "没有候选个体";
-        Map<String, Object> shadow = jdbcShadowStats(h);
+        // 影子期表现只看 shadowStart..asOf，不再把全历史累计样本当成「影子运行成绩」
+        Map<String, Object> shadow = jdbcShadowStats(h, shadowStart, asOf);
         double shadowBal = shadow.isEmpty() ? 0 : ((Number) shadow.get("bal")).doubleValue();
-        Map<String, Object> champion = jdbcChampionStats(h);
+        Map<String, Object> champion = jdbcChampionStats(h, shadowStart, asOf);
         double championBal = champion.isEmpty() ? 0 : ((Number) champion.get("bal")).doubleValue();
         if (championBal > 0 && shadowBal < championBal - config.getDouble(h, "shadow_tolerance")) {
             for (Map<String, Object> c : candidates) {
                 store.setIndividualStatus(((Number) c.get("individualId")).longValue(), "REJECTED", "SHADOW_FAIL");
             }
             config.set("H" + h, "shadow_start", "");
+            store.clearRuntimeShadowWeights(h);
+            config.reload();
             return String.format("影子 BalAcc %.4f 低于现任冠军 %.4f，本轮不晋升", shadowBal, championBal);
         }
 
@@ -245,31 +254,33 @@ public class ChampionService {
         double[] weights = GaMath.softmax(candidates.stream().mapToDouble(c ->
                 c.get("fitness") instanceof Number n ? n.doubleValue() : 0).toArray(),
                 config.getDouble(h, "softmax_temp"));
-        for (int i = 0; i < candidates.size() && i < config.getInt(h, "candidate_k"); i++) {
+        int promoted = Math.min(candidates.size(), config.getInt(h, "candidate_k"));
+        for (int i = 0; i < candidates.size(); i++) {
             Map<String, Object> c = candidates.get(i);
             long id = ((Number) c.get("individualId")).longValue();
-            store.setIndividualStatus(id, "CHAMPION", null);
-            store.insertChampion(h, version, id, i + 1, weights[i], asOf,
-                    c.get("runId") instanceof Number n ? n.longValue() : 0);
+            if (i < promoted) {
+                store.setIndividualStatus(id, "CHAMPION", null);
+                store.insertChampion(h, version, id, i + 1, weights[i], asOf,
+                        c.get("runId") instanceof Number n ? n.longValue() : 0);
+            } else {
+                // 旧实现只晋升前 K 个，其余 CANDIDATE 永久残留，导致影子集成长期混入过期候选
+                store.setIndividualStatus(id, "REJECTED", "SHADOW_REPLACED");
+            }
         }
         config.set("H" + h, "shadow_start", "");
-        return String.format("晋升冠军集 %s（%d 个个体）", version, Math.min(candidates.size(), config.getInt(h, "candidate_k")));
+        config.set("H" + h, "shadow_run_id", "");
+        store.clearRuntimeShadowWeights(h);
+        config.reload();
+        return String.format("晋升冠军集 %s（%d 个个体，清理 %d 个残留候选）",
+                version, promoted, candidates.size() - promoted);
     }
 
-    private Map<String, Object> jdbcShadowStats(int h) {
-        // 影子预测命中率由 ga_prediction 直接统计（model_role=SHADOW）
-        return balaccOf(storeShadowRows(h));
+    private Map<String, Object> jdbcShadowStats(int h, LocalDate from, LocalDate to) {
+        return balaccOf(store.rolePredictions(h, "SHADOW", from, to, 200000));
     }
 
-    private Map<String, Object> jdbcChampionStats(int h) {
-        return balaccOf(storeShadowRows(h, "CHAMPION"));
-    }
-
-    private List<Map<String, Object>> storeShadowRows(int h) { return storeShadowRows(h, "SHADOW"); }
-
-    /** 复用预测表做 BalAcc 统计；避免新增专用表。 */
-    private List<Map<String, Object>> storeShadowRows(int h, String role) {
-        return store.rolePredictions(h, role, 200000);
+    private Map<String, Object> jdbcChampionStats(int h, LocalDate from, LocalDate to) {
+        return balaccOf(store.rolePredictions(h, "CHAMPION", from, to, 200000));
     }
 
     private Map<String, Object> balaccOf(List<Map<String, Object>> rows) {
@@ -290,13 +301,14 @@ public class ChampionService {
 
     /** 规格 9.1.3：每周在最近 60 个基准日已验证样本上对 logit(p̄) 做一维逻辑回归。 */
     public String refitCalibration(int h) {
-        List<Map<String, Object>> rows = store.allPredictionsForMetric(
-                LocalDate.now().minusDays(120), LocalDate.now(), 200000);
+        // 旧实现用 allPredictionsForMetric（SELECT 里没有 score_raw）+ 升序 LIMIT，
+        // scoreRaw 恒为 null → samples 恒空 → 校准永远不更新；改用专用窄查询并下推周期。
+        List<Map<String, Object>> rows = store.calibrationSamples(
+                LocalDate.now().minusDays(120), LocalDate.now(), h, 200000);
         List<double[]> samples = new ArrayList<>();
         for (Map<String, Object> r : rows) {
             Object raw = r.get("scoreRaw"), ret = r.get("actualReturn");
             if (!(raw instanceof Number) || !(ret instanceof Number)) continue;
-            if (r.get("horizon") instanceof Number n && n.intValue() != h) continue;
             double x = ((Number) raw).doubleValue();
             double y = ((Number) ret).doubleValue() > 0 ? 1 : 0;
             if (Double.isFinite(x)) samples.add(new double[]{x, y});

@@ -132,3 +132,19 @@ primary key (code, market, trade_date, adjustflag)
 不抛 `DuplicateKeyException`；回放断点由 `ga_run` 的 REPLAY 成功记录跳过，某交易日各周期已齐全时
 也不再重复生成。因此历史回放重跑不会改写已验证结果，需要重新回填时请先跑 `VerifyJob`。
 复盘数据需跑 `/evolution/replay` 生成历史预测并回填。
+
+### 6.4 告警与前端指标说明
+
+`GET /overview` 除 `kpi` 外还返回 `alerts: [{level, text}]`，等级 `info/warn/error`。其中最常见的：
+
+```text
+level=error, text="近区间命中率 22.79% 低于 50%，模型可能退化，建议检查进化监控"
+触发条件：nVerified ≥ 200 且 hitRate < ga_config 的 alert_hit_rate（默认 0.50）
+```
+
+这是一条**排查提示**，不是模型报废判定；完整 7 步处置 SOP 见
+`docs/功能与公式说明.md` 9.12 节。前端在告警条右侧提供「怎么处理？」按钮，点击直接打开
+「指标说明与操作指引」弹窗并定位到对应指引；顶部「? 指标说明」则是全部英文指标的中文释义，
+页面里带 <kbd>?</kbd> 角标的英文指标（KPI、表头、任务名、参数键）点击后会跳转并高亮对应词条。
+术语表由前端 `src/ga/glossary.js` 维护，并通过 `GET /config`（**scope 必须为空串**才是全部作用域，
+传 `ALL` 会被当成真实作用域过滤成 0 行）实时补入 100+ 个 `paramKey` 的中文说明、当前值与默认值。

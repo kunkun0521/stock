@@ -131,4 +131,54 @@ class GaApiContractTest {
                 .andExpect(status().isOk())
                 .andExpect(jsonPath("$.data.ok").value(true));
     }
+
+    /** 数据体检是纯只读接口，返回脏数据、保留期、表占用与保护清单四类结构。 */
+    @Test
+    void cleanupInspectReturnsReadOnlyReport() throws Exception {
+        mvc.perform(get(BASE + "/cleanup/inspect"))
+                .andExpect(status().isOk())
+                .andExpect(jsonPath("$.code").value(0))
+                .andExpect(jsonPath("$.data.anchorDate").exists())
+                .andExpect(jsonPath("$.data.dirty").isArray())
+                .andExpect(jsonPath("$.data.retention").isArray())
+                .andExpect(jsonPath("$.data.tables").isArray())
+                .andExpect(jsonPath("$.data.protectedTables").isArray())
+                .andExpect(jsonPath("$.data.policy.rules").isArray());
+        mvc.perform(get(BASE + "/cleanup/policy"))
+                .andExpect(status().isOk())
+                .andExpect(jsonPath("$.data.rules").isArray());
+        mvc.perform(get(BASE + "/cleanup/history?limit=5"))
+                .andExpect(status().isOk())
+                .andExpect(jsonPath("$.data").isArray());
+    }
+
+    /**
+     * 安全约束：默认 dryRun=true 只预览不写库；真实执行缺 confirm 必须拒绝；
+     * 非法 mode 必须拒绝。绝不因测试而真的删库。
+     */
+    @Test
+    void cleanupRunIsDryRunByDefaultAndRequiresConfirm() throws Exception {
+        mvc.perform(post(BASE + "/cleanup/run").contentType(MediaType.APPLICATION_JSON)
+                        .content("{\"mode\":\"all\"}"))
+                .andExpect(status().isOk())
+                .andExpect(jsonPath("$.code").value(0))
+                .andExpect(jsonPath("$.data.dryRun").value(true))
+                .andExpect(jsonPath("$.data.steps").isArray());
+        mvc.perform(post(BASE + "/cleanup/run").contentType(MediaType.APPLICATION_JSON)
+                        .content("{\"mode\":\"purge\",\"dryRun\":false}"))
+                .andExpect(status().isOk())
+                .andExpect(jsonPath("$.code").value(1));
+        mvc.perform(post(BASE + "/cleanup/run").contentType(MediaType.APPLICATION_JSON)
+                        .content("{\"mode\":\"DROP_EVERYTHING\",\"dryRun\":true}"))
+                .andExpect(status().isOk())
+                .andExpect(jsonPath("$.code").value(1));
+    }
+
+    /** CleanupJob 已注册到任务清单，可被看板触发。 */
+    @Test
+    void cleanupJobIsRegistered() throws Exception {
+        mvc.perform(get(BASE + "/jobs/status"))
+                .andExpect(status().isOk())
+                .andExpect(jsonPath("$.data[?(@.name=='CleanupJob')]").exists());
+    }
 }

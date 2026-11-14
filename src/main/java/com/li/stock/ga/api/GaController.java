@@ -1,6 +1,7 @@
 package com.li.stock.ga.api;
 
 import com.li.stock.common.ApiResponse;
+import com.li.stock.ga.cleanup.GaCleanupService;
 import com.li.stock.ga.config.GaConfig;
 import com.li.stock.ga.job.GaJobRunner;
 import com.li.stock.ga.metric.GaQueryService;
@@ -55,22 +56,27 @@ public class GaController {
     private final GaJobRunner jobs;
     private final ChampionService champions;
     private final PoolService pool;
+    private final GaCleanupService cleanup;
 
     @Value("${stock.ga.cron-daily:0 30 17 * * ?}")
     private String cronDaily;
     @Value("${stock.ga.cron-evolve:0 0 2 ? * SAT}")
     private String cronEvolve;
+    @Value("${stock.ga.cron-cleanup:0 0 4 ? * SUN}")
+    private String cronCleanup;
 
     private static final DateTimeFormatter TIME_FMT = DateTimeFormatter.ofPattern("yyyy-MM-dd HH:mm:ss");
 
     public GaController(GaQueryService query, GaStoreRepository store, GaConfig config,
-                        GaJobRunner jobs, ChampionService champions, PoolService pool) {
+                        GaJobRunner jobs, ChampionService champions, PoolService pool,
+                        GaCleanupService cleanup) {
         this.query = query;
         this.store = store;
         this.config = config;
         this.jobs = jobs;
         this.champions = champions;
         this.pool = pool;
+        this.cleanup = cleanup;
     }
 
     // ================================================================== 总览
@@ -418,10 +424,13 @@ public class GaController {
         out.put("enabled", jobs.isScheduleEnabled());
         out.put("cronDaily", cronDaily);
         out.put("cronEvolve", cronEvolve);
+        out.put("cronCleanup", cronCleanup);
         out.put("nextDaily", nextFire(cronDaily));
         out.put("nextEvolve", nextFire(cronEvolve));
+        out.put("nextCleanup", nextFire(cronCleanup));
         out.put("dailyJob", "DailyPipeline");
         out.put("weeklyJob", "WeeklyEvolve");
+        out.put("cleanupJob", "CleanupJob");
         out.put("initJob", "InitJob");
         out.put("initEnabled", jobs.isInitEnabled());
         out.put("initReady", jobs.isInitReady());
@@ -477,6 +486,65 @@ public class GaController {
         } catch (Exception e) {
             return "";
         }
+    }
+
+    // ================================================================== 数据体检 / 清理
+
+    /** 只读体检：脏数据条数、保留期待删行数、各表占用、策略与受保护表。 */
+    @GetMapping("/cleanup/inspect")
+    public ApiResponse<Map<String, Object>> cleanupInspect() {
+        try {
+            return ApiResponse.ok(cleanup.inspect());
+        } catch (Exception e) {
+            return failed(e.getMessage());
+        }
+    }
+
+    /** 当前保留期策略（配置页/清理页共用）。 */
+    @GetMapping("/cleanup/policy")
+    public ApiResponse<Map<String, Object>> cleanupPolicy() {
+        try {
+            return ApiResponse.ok(castMap(cleanup.inspect().get("policy")));
+        } catch (Exception e) {
+            return failed(e.getMessage());
+        }
+    }
+
+    /**
+     * 执行修复 / 清理 / 两者。
+     *
+     * <p>默认 dryRun=true 只预览；真实执行必须同时 dryRun=false 与 confirm=true，
+     * 防止误触删掉历史数据。返回各步骤处理行数与耗时。</p>
+     */
+    @PostMapping("/cleanup/run")
+    public ApiResponse<Map<String, Object>> cleanupRun(@RequestBody(required = false) Map<String, Object> body) {
+        try {
+            Map<String, Object> b = body == null ? Map.of() : body;
+            String mode = str(b.get("mode"));
+            boolean dryRun = !"false".equalsIgnoreCase(str(b.get("dryRun")))
+                    && !"0".equals(str(b.get("dryRun"))) && !Boolean.FALSE.equals(b.get("dryRun"));
+            boolean confirm = "true".equalsIgnoreCase(str(b.get("confirm")))
+                    || "1".equals(str(b.get("confirm"))) || Boolean.TRUE.equals(b.get("confirm"));
+            return ApiResponse.ok(cleanup.run(mode.isBlank() ? "all" : mode, dryRun, confirm));
+        } catch (Exception e) {
+            return failed(e.getMessage());
+        }
+    }
+
+    /** 数据清理审计历史。 */
+    @GetMapping("/cleanup/history")
+    public ApiResponse<List<Map<String, Object>>> cleanupHistory(
+            @RequestParam(required = false, defaultValue = "30") Integer limit) {
+        try {
+            return ApiResponse.ok(cleanup.history(limit == null ? 30 : limit));
+        } catch (Exception e) {
+            return failed(e.getMessage());
+        }
+    }
+
+    @SuppressWarnings("unchecked")
+    private static Map<String, Object> castMap(Object o) {
+        return o instanceof Map<?, ?> m ? (Map<String, Object>) m : Map.of();
     }
 
     // ================================================================== 参数工具

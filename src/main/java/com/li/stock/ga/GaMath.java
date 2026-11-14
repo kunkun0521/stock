@@ -10,6 +10,8 @@ public final class GaMath {
     public static double clamp(double v, double lo, double hi) { return Math.max(lo, Math.min(hi, v)); }
     public static boolean finite(double v) { return Double.isFinite(v); }
     public static double sigmoid(double s) {
+        // NaN 会让 Math.exp 也返回 NaN，进而污染 fitness / brier / 排序；统一当作「无信号」0.5
+        if (!finite(s)) return 0.5;
         if (s >= 0) return 1.0 / (1.0 + Math.exp(-s));
         double e = Math.exp(s);
         return e / (1.0 + e);
@@ -72,18 +74,21 @@ public final class GaMath {
         double[] sorted = Arrays.copyOf(pool, nValid);
         Arrays.sort(sorted);
         double lo = quantileSorted(sorted, q), hi = quantileSorted(sorted, 1 - q);
-        double m = 0;
+        boolean[] usable = new boolean[n];
         for (int i = 0; i < n; i++) {
-            if (valid[i] && finite(values[i])) out[i] = (float) clamp(values[i], lo, hi);
-            else out[i] = 0f;
+            usable[i] = valid[i] && finite(values[i]);
+            out[i] = usable[i] ? (float) clamp(values[i], lo, hi) : 0f;
         }
-        for (int i = 0; i < n; i++) m += out[i];
-        m /= n;
+        // 均值/标准差只统计有效样本：无效样本已被置 0，若并入统计会得到「截面均值位置」
+        // 的非零虚假 z 值，与「缺失特征按截面均值 0 处理」的约定冲突。
+        double m = 0;
+        for (int i = 0; i < n; i++) if (usable[i]) m += out[i];
+        m /= Math.max(1, nValid);
         double ss = 0;
-        for (int i = 0; i < n; i++) ss += (out[i] - m) * (out[i] - m);
-        double sd = Math.sqrt(ss / Math.max(1, n - 1));
+        for (int i = 0; i < n; i++) if (usable[i]) ss += (out[i] - m) * (out[i] - m);
+        double sd = Math.sqrt(ss / Math.max(1, nValid - 1));
         if (sd < EPS) { Arrays.fill(out, 0f); return false; }
-        for (int i = 0; i < n; i++) out[i] = (float) ((out[i] - m) / sd);
+        for (int i = 0; i < n; i++) out[i] = usable[i] ? (float) ((out[i] - m) / sd) : 0f;
         return false;
     }
 
@@ -119,11 +124,13 @@ public final class GaMath {
         if (n < 2) return 0;
         double ma = mean(a, 0, n), mb = mean(b, 0, n);
         double num = 0, da = 0, db = 0;
+        int pairs = 0;
         for (int i = 0; i < n; i++) {
+            if (!finite(a[i]) || !finite(b[i])) continue;  // mean 会跳过 NaN，循环也必须跳过
             double x = a[i] - ma, y = b[i] - mb;
-            num += x * y; da += x * x; db += y * y;
+            num += x * y; da += x * x; db += y * y; pairs++;
         }
-        return da < EPS || db < EPS ? 0 : num / Math.sqrt(da * db);
+        return pairs < 2 || da < EPS || db < EPS ? 0 : num / Math.sqrt(da * db);
     }
 
     public static double spearman(double[] a, double[] b) { return pearson(ranks(a), ranks(b)); }
@@ -152,10 +159,15 @@ public final class GaMath {
     public static double[] softmax(double[] v, double temperature) {
         double[] out = new double[v.length];
         if (v.length == 0) return out;
-        double max = v[0];
-        for (double x : v) max = Math.max(max, x);
+        double max = Double.NEGATIVE_INFINITY;
+        for (double x : v) if (finite(x)) max = Math.max(max, x);
+        if (!finite(max)) { java.util.Arrays.fill(out, 1.0 / v.length); return out; } // 全 NaN：退化为均匀权重
         double t = Math.max(1e-6, temperature), sum = 0;
-        for (int i = 0; i < v.length; i++) { out[i] = Math.exp((v[i] - max) / t); sum += out[i]; }
+        for (int i = 0; i < v.length; i++) {
+            out[i] = finite(v[i]) ? Math.exp((v[i] - max) / t) : 0;
+            sum += out[i];
+        }
+        if (sum < EPS) { java.util.Arrays.fill(out, 1.0 / v.length); return out; }
         for (int i = 0; i < v.length; i++) out[i] /= sum;
         return out;
     }

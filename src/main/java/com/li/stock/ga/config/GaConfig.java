@@ -136,6 +136,24 @@ public class GaConfig {
         put("verify_batch_size", "5000", "回填每批条数");
         put("verify_page_size", "20000", "回填游标分页每页条数");
         put("init_days", "10", "初始化任务回灌的最近交易日天数（看板冷启动展示用）");
+        // ---- 数据清理与保留策略（CleanupJob / 数据清理页）----
+        put("cleanup_enabled", "1", "是否启用定时数据清理（0 关闭，看板手动触发仍可用）");
+        put("cleanup_dry_run", "1", "1=仅预览不删除；置 0 并显式 confirm 才会真删");
+        put("cleanup_prediction_days", "365", "实盘预测 ga_prediction 保留自然日数（按 trade_date）");
+        put("cleanup_replay_days", "120", "回放预测保留自然日数（历史占位数据，可更短）");
+        put("cleanup_feature_days", "600", "特征缓存 stock_feature_daily 保留自然日数（需覆盖训练窗口与预热）");
+        put("cleanup_metric_days", "365", "ga_metric_daily 保留自然日数（按 as_of_date）");
+        put("cleanup_factor_ic_days", "365", "ga_factor_ic_daily 保留自然日数（按 as_of_date）");
+        put("cleanup_job_log_days", "90", "ga_job_log 保留自然日数");
+        put("cleanup_run_days", "365", "ga_run / ga_generation_stat / ga_individual 保留自然日数");
+        put("cleanup_pool_log_days", "365", "淘汰事件日志保留自然日数");
+        put("cleanup_market_days", "600", "ga_market_daily 保留自然日数");
+        put("cleanup_min_keep_days", "30", "安全下限：任何表都不得删除最近 N 自然日的数据");
+        put("cleanup_batch_size", "5000", "分批删除每批行数（避免长事务锁表）");
+        put("cleanup_max_rows", "200000", "单次清理最多删除行数（安全阀）");
+        put("cleanup_protect_pending", "1", "1=保护 PENDING（尚未回填）预测不被删除");
+        put("cleanup_repair", "1", "清理前自动修复可识别的脏数据（幂等）");
+        put("cleanup_regenerate_ic_days", "2", "清理后重算因子 IC 的最近交易日数（0 关闭，最多 10）");
     }
 
     public static Map<String, String> defaults() {
@@ -143,7 +161,8 @@ public class GaConfig {
     }
 
     private final JdbcTemplate jdbc;
-    private final Map<String, String> cache = new ConcurrentHashMap<>();
+    /** 整体替换的不可变快照：reload 期间读线程仍看到完整旧快照，不会短暂回退到代码默认值。 */
+    private volatile Map<String, String> cache = Map.of();
 
     public GaConfig(JdbcTemplate jdbc) {
         this.jdbc = jdbc;
@@ -158,11 +177,14 @@ public class GaConfig {
     }
 
     public void reload() {
-        cache.clear();
+        // copy-on-write：先填临时 Map，完成后整体替换。旧实现先 clear 再逐行 put，
+        // 保存配置时正在跑 GA 的线程会读到空/半加载缓存，参数短暂回退破坏可复现性。
+        Map<String, String> next = new ConcurrentHashMap<>();
         jdbc.query("SELECT `scope`,`param_key`,`param_value` FROM `ga_config`",
-                (org.springframework.jdbc.core.RowCallbackHandler) rs -> cache.put(
+                (org.springframework.jdbc.core.RowCallbackHandler) rs -> next.put(
                         rs.getString("scope") + "|" + rs.getString("param_key"),
                         rs.getString("param_value") == null ? "" : rs.getString("param_value")));
+        cache = Map.copyOf(next);
     }
 
     /** 周期级覆盖全局：先查 H{h}，再查 GLOBAL，最后回退代码默认值。 */

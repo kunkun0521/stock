@@ -93,8 +93,10 @@ public class GaStoreRepository {
     }
 
     public List<Map<String, Object>> generations(long runId) {
+        // best_balacc_valid / best_ic_valid 由 insertGenerations 写入，旧查询漏投影导致进化页永远为空
         return jdbc.queryForList("SELECT `generation`,`best_fitness`,`avg_fitness`,`median_fitness`,"
-                + "`worst_fitness`,`diversity`,`culled_count`,`immigrants_count`,`mutation_rate_w` "
+                + "`worst_fitness`,`diversity`,`culled_count`,`immigrants_count`,`mutation_rate_w`,"
+                + "`best_balacc_valid`,`best_ic_valid` "
                 + "FROM `ga_generation_stat` WHERE `run_id`=? ORDER BY `generation`", runId)
                 .stream().map(this::camel).toList();
     }
@@ -183,8 +185,13 @@ public class GaStoreRepository {
     }
 
     public void deactivateChampions(int horizon, LocalDate effectiveTo) {
-        jdbc.update("UPDATE `ga_champion_set` SET `is_current`=0,`effective_to`=? "
-                + "WHERE `horizon`=? AND `is_current`=1", Date.valueOf(effectiveTo), horizon);
+        // 回放断点日期可能早于该版本的 effective_from（历史回放写完后再补写未来版本），
+        // 直接写 effective_to 会产生 50 行 effective_from > effective_to 的倒挂脏数据。
+        // 用 GREATEST 兜底：生效区间不允许出现负长度。
+        jdbc.update("UPDATE `ga_champion_set` SET `is_current`=0,"
+                + "`effective_to`=GREATEST(COALESCE(`effective_from`,?),?) "
+                + "WHERE `horizon`=? AND `is_current`=1",
+                Date.valueOf(effectiveTo), Date.valueOf(effectiveTo), horizon);
     }
 
     public void insertChampion(int horizon, String versionTag, long individualId, int rankNo,
@@ -277,7 +284,9 @@ public class GaStoreRepository {
         if ("CORRECT".equalsIgnoreCase(result)) w.append(" AND `is_correct`=1");
         if ("WRONG".equalsIgnoreCase(result)) w.append(" AND `is_correct`=0");
         addEq(w, args, "`in_pool`", q.get("inPool"), true);
-        addEq(w, args, "`is_replay`", q.get("includeReplay"), true);
+        // includeReplay 语义与 /overview 对齐：1/空 = 包含回放（不过滤）；0 = 仅实盘。
+        // 旧实现直接把 1 当成 is_replay=1 的等值条件，勾「包含回放」反而只显示回放。
+        if ("0".equals(q.get("includeReplay"))) w.append(" AND `is_replay`=0");
         addLike(w, args, q.get("board"));
         String keyword = q.get("keyword");
         if (keyword != null && !keyword.isBlank()) { w.append(" AND `code` LIKE ?"); args.add("%" + keyword.trim() + "%"); }
@@ -337,20 +346,68 @@ public class GaStoreRepository {
 
     /** 影子 / 冠军预测的非观望已验证行，用于晋升 BalAcc 比较。 */
     public List<Map<String, Object>> rolePredictions(int h, String role, int limit) {
-        return jdbc.queryForList("SELECT `pred_direction`,`is_correct`,`horizon` FROM `ga_prediction` "
-                + "WHERE `horizon`=? AND `model_role`=? AND `status`='VERIFIED' "
-                + "AND `pred_direction`<>0 AND `is_correct` IS NOT NULL "
-                + "ORDER BY `trade_date` DESC LIMIT ?", h, role, limit)
-                .stream().map(this::camel).toList();
+        return rolePredictions(h, role, null, null, limit);
+    }
+
+    /**
+     * 指定时间窗口的已验证样本：retire_window / shadow 期必须按真实窗口统计，
+     * 旧实现没有 trade_date 条件，把全历史（含 150 万行回放）当「近 60 日」用。
+     */
+    public List<Map<String, Object>> rolePredictions(int h, String role, LocalDate from, LocalDate to, int limit) {
+        StringBuilder w = new StringBuilder(" WHERE `horizon`=? AND `model_role`=? AND `status`='VERIFIED' "
+                + "AND `pred_direction`<>0 AND `is_correct` IS NOT NULL ");
+        List<Object> args = new ArrayList<>(List.of(h, role));
+        if (from != null) { w.append(" AND `trade_date`>=?"); args.add(Date.valueOf(from)); }
+        if (to != null) { w.append(" AND `trade_date`<=?"); args.add(Date.valueOf(to)); }
+        w.append(" ORDER BY `trade_date` DESC,`id` DESC LIMIT ?"); args.add(limit);
+        return jdbc.queryForList("SELECT `pred_direction`,`is_correct`,`horizon` FROM `ga_prediction`" + w,
+                args.toArray()).stream().map(this::camel).toList();
     }
 
     public List<Map<String, Object>> allPredictionsForMetric(LocalDate from, LocalDate to, int limit) {
-        // 只投影统计需要的列：explain_json 等大字段会让几十万行直接把堆吃满
+        // 只投影统计需要的列：explain_json 等大字段会让几十万行直接把堆吃满。
+        // status / score_raw 必须投影：PoolService.hitRates 与 ChampionService.refitCalibration
+        // 都从 Map 里读这两列，缺列会让整条链路静默失效（历史上已发生过）。
+        // 倒序取最近样本：旧实现 ORDER BY trade_date 升序 + LIMIT 只会拿到区间里最老的一段。
         return jdbc.queryForList("SELECT `trade_date`,`horizon`,`code`,`market`,`model_role`,`is_replay`,"
-                + "`in_pool`,`pred_direction`,`prob_up`,`actual_return`,`is_correct`,`regime` "
+                + "`in_pool`,`pred_direction`,`prob_up`,`score_raw`,`actual_return`,`is_correct`,`regime`,`status` "
                 + "FROM `ga_prediction` WHERE `status`='VERIFIED' "
-                + "AND `trade_date` BETWEEN ? AND ? ORDER BY `trade_date` LIMIT ?",
+                + "AND `trade_date` BETWEEN ? AND ? ORDER BY `trade_date` DESC,`id` DESC LIMIT ?",
                 Date.valueOf(from), Date.valueOf(to), limit).stream().map(this::camel).toList();
+    }
+
+    /**
+     * 股票池命中率专用：直接在 SQL 里按 60/20 个基准日聚合成 (code,market) 行，
+     * 不再把几十万行明细拉进 JVM 堆，也不受 LIMIT 截断成「最早一个月」的影响。
+     *
+     * <p>主榜 = CHAMPION 且 in_pool=1；影子 = SHADOW 或 in_pool=0。
+     * 只统计 is_correct 非空（已判定）的行，NULL 行是历史回填缺陷留下的脏数据，
+     * 由 CleanupService 修复，不参与命中率。</p>
+     */
+    public List<Map<String, Object>> poolHitRates(LocalDate mainFrom, LocalDate shadowFrom, LocalDate to) {
+        return jdbc.queryForList("SELECT `code`,`market`,"
+                        + "SUM(CASE WHEN `model_role`='CHAMPION' AND `in_pool`=1 AND `trade_date`>=? "
+                        + "     THEN 1 ELSE 0 END) `mainN`,"
+                        + "SUM(CASE WHEN `model_role`='CHAMPION' AND `in_pool`=1 AND `trade_date`>=? "
+                        + "     THEN `is_correct` ELSE 0 END) `mainC`,"
+                        + "SUM(CASE WHEN (`model_role`<>'CHAMPION' OR `in_pool`=0) AND `trade_date`>=? "
+                        + "     THEN 1 ELSE 0 END) `shadowN`,"
+                        + "SUM(CASE WHEN (`model_role`<>'CHAMPION' OR `in_pool`=0) AND `trade_date`>=? "
+                        + "     THEN `is_correct` ELSE 0 END) `shadowC` "
+                        + "FROM `ga_prediction` WHERE `status`='VERIFIED' AND `is_correct` IS NOT NULL "
+                        + "AND `trade_date` BETWEEN ? AND ? GROUP BY `code`,`market`",
+                Date.valueOf(mainFrom), Date.valueOf(mainFrom), Date.valueOf(shadowFrom),
+                Date.valueOf(shadowFrom), Date.valueOf(mainFrom), Date.valueOf(to))
+                .stream().map(this::camel).toList();
+    }
+
+    /** Platt 校准样本：只取 score_raw / actual_return 两列，按周期下推、倒序取最近样本。 */
+    public List<Map<String, Object>> calibrationSamples(LocalDate from, LocalDate to, int horizon, int limit) {
+        return jdbc.queryForList("SELECT `score_raw`,`actual_return` FROM `ga_prediction` "
+                        + "WHERE `status`='VERIFIED' AND `model_role`='CHAMPION' AND `in_pool`=1 "
+                        + "AND `horizon`=? AND `score_raw` IS NOT NULL AND `actual_return` IS NOT NULL "
+                        + "AND `trade_date` BETWEEN ? AND ? ORDER BY `trade_date` DESC,`id` DESC LIMIT ?",
+                horizon, Date.valueOf(from), Date.valueOf(to), limit).stream().map(this::camel).toList();
     }
 
     /**
@@ -487,6 +544,12 @@ public class GaStoreRepository {
         return jdbc.queryForList("SELECT DISTINCT `as_of_date` FROM `ga_factor_ic_daily` "
                         + "WHERE `as_of_date` BETWEEN ? AND ? ORDER BY `as_of_date`",
                 LocalDate.class, Date.valueOf(from), Date.valueOf(to));
+    }
+
+    /** 清理某周期遗留的运行时影子权重（每次准入都会写 shadow_weight_i，旧值不会自动消失）。 */
+    public void clearRuntimeShadowWeights(int horizon) {
+        jdbc.update("DELETE FROM `ga_config` WHERE `scope`=? AND `param_key` LIKE 'shadow_weight_%'",
+                "H" + horizon);
     }
 
     public void logJob(String job, String status, String message, int processed) {

@@ -289,3 +289,16 @@ CREATE TABLE IF NOT EXISTS `ga_job_log` (
   PRIMARY KEY (`id`),
   KEY `idx_ga_job` (`job_name`, `id` DESC)
 ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COMMENT='任务执行日志与互斥状态';
+
+CREATE TABLE IF NOT EXISTS `ga_cleanup_log` (
+  `id` BIGINT NOT NULL AUTO_INCREMENT,
+  `mode` VARCHAR(16) NOT NULL COMMENT 'repair / purge / all',
+  `dry_run` TINYINT NOT NULL DEFAULT 1 COMMENT '1 仅预览不写库',
+  `detail` VARCHAR(2000) DEFAULT NULL,
+  `processed` INT NOT NULL DEFAULT 0,
+  `started_at` DATETIME DEFAULT NULL,
+  `finished_at` DATETIME DEFAULT NULL,
+  `created_at` DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP,
+  PRIMARY KEY (`id`),
+  KEY `idx_ga_cleanup_time` (`id` DESC)
+) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COMMENT='数据清理审计日志（只追加，不随清理删除）';

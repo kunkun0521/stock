@@ -45,6 +45,8 @@ public class PoolService {
         Map<String, List<Bar>> bars = data.loadBarsWithScores(flag, from, asOf);
         Map<String, Object> states = store.poolStates();
         Map<String, HitRate> hits = hitRates(asOf);
+        // vol_20 截面分位：旧实现写死 0.0，导致 EXTREME_VOL 永不淘汰、复活恒通过
+        Map<String, Double> volQuantiles = volQuantiles(bars);
         int eliminated = 0, restored = 0;
         Map<String, Integer> reasons = new LinkedHashMap<>();
 
@@ -64,7 +66,7 @@ public class PoolService {
                     : LocalDate.parse(String.valueOf(state.get("sinceDate")).substring(0, 10));
 
             HitRate hit = hits.getOrDefault(key, new HitRate(0, 0, 0, 0));
-            Metrics m = metrics(series, config);
+            Metrics m = metrics(series, config, volQuantiles.getOrDefault(key, 0.0));
             boolean whitelisted = "WHITELIST".equals(status);
 
             if ("ACTIVE".equals(status) || whitelisted) {
@@ -96,7 +98,7 @@ public class PoolService {
                         snapshot.put("hitRate60", hit.hit60); snapshot.put("n60", hit.n60);
                     }
                 }
-                if (reason != null && coolingOk(key, "ELIMINATE", asOf, since, false)) {
+                if (reason != null && coolingOk(key, "ELIMINATE", asOf)) {
                     apply(code, market, flag, "ELIMINATED", reason, detail, asOf, hit, snapshot, "SYSTEM");
                     eliminated++; reasons.merge(reason, 1, Integer::sum);
                 } else if (state == null) {
@@ -124,17 +126,17 @@ public class PoolService {
                 };
                 restoreDetail = "满足复活条件（" + currentReason + "）";
             }
-            if (restoredNow && coolingOk(key, "RESTORE", asOf, since, true)) {
+            if (restoredNow && coolingOk(key, "RESTORE", asOf)) {
                 apply(code, market, flag, "ACTIVE", "", restoreDetail, asOf, hit,
                         Map.of("reason", currentReason), "SYSTEM");
                 restored++;
             }
         }
 
-        String summary = String.format("本次淘汰 %d 只、复活 %d 只，原因分布 %s",
+        // 任务日志统一由 GaJobRunner.submitNamed 写入，这里不再重复写一条 SUCCESS
+        // （旧实现会覆盖掉外层记录的 processed，看板显示 0）
+        return String.format("本次淘汰 %d 只、复活 %d 只，原因分布 %s",
                 eliminated, restored, reasons);
-        store.logJob("PoolJob", "SUCCESS", summary, eliminated + restored);
-        return summary;
     }
 
     private void apply(String code, String market, int flag, String status, String reason,
@@ -160,8 +162,13 @@ public class PoolService {
             case "WHITELIST" -> "WHITELIST";
             default -> throw new IllegalArgumentException("不支持的操作：" + action);
         };
-        String event = "MANUAL_ELIMINATE".equals(action.toUpperCase()) ? "MANUAL_ELIMINATE"
-                : "WHITELIST".equalsIgnoreCase(action) ? "WHITELIST" : "MANUAL_RESTORE";
+        // 旧实现判断 "MANUAL_ELIMINATE".equals(action) 恒为 false，手动淘汰会被记成「复活」事件，
+        // 审计日志与个股时间线显示反向操作。按最终状态映射才不会错。
+        String event = switch (status) {
+            case "ELIMINATED" -> "MANUAL_ELIMINATE";
+            case "WHITELIST" -> "WHITELIST";
+            default -> "MANUAL_RESTORE";
+        };
         String reason = "MANUAL";
         store.upsertPool(code, market, flag, status, "ELIMINATED".equals(status) ? reason : null,
                 remark, asOf, null, null, null, null, asOf);
@@ -174,50 +181,58 @@ public class PoolService {
         return action + " 成功";
     }
 
-    /** 近 60 个基准日（主榜）与淘汰后影子预测近 20 日的命中率。 */
+    /** 近 60 个基准日（主榜）与淘汰后影子预测近 20 日的命中率，SQL 侧直接聚合。 */
     private Map<String, HitRate> hitRates(LocalDate asOf) {
         Map<String, HitRate> out = new HashMap<>();
-        List<Map<String, Object>> rows = store.allPredictionsForMetric(asOf.minusDays(150), asOf, 400000);
-        Map<String, int[]> main = new HashMap<>(), shadow = new HashMap<>();
-        for (Map<String, Object> r : rows) {
-            if (!"VERIFIED".equals(String.valueOf(r.get("status")))) continue;
-            Object c = r.get("isCorrect");
-            if (!(c instanceof Number)) continue;
+        // 用真实交易日历换算「基准日」而不是自然日：60 个交易日 ≈ 85 自然日，
+        // 20 个交易日 ≈ 30 自然日；旧实现固定 150 自然日且受 LIMIT 截断成最早一个月。
+        int mainDays = Math.max(1, config.globalInt("pool_poor_window"));
+        int shadowDays = Math.max(1, config.globalInt("pool_restore_window"));
+        LocalDate mainFrom = tradingDayBack(asOf, mainDays);
+        LocalDate shadowFrom = tradingDayBack(asOf, shadowDays);
+        for (Map<String, Object> r : store.poolHitRates(mainFrom, shadowFrom, asOf)) {
             String key = r.get("code") + "|" + r.get("market");
-            int hit = ((Number) c).intValue();
-            boolean isShadow = "SHADOW".equals(String.valueOf(r.get("modelRole")))
-                    || intVal(r.get("inPool")) == 0;
-            int[] arr = (isShadow ? shadow : main).computeIfAbsent(key, k -> new int[2]);
-            arr[0] += hit; arr[1]++;
-        }
-        java.util.Set<String> keys = new java.util.HashSet<>(main.keySet());
-        keys.addAll(shadow.keySet());
-        for (String k : keys) {
-            int[] a = main.getOrDefault(k, new int[2]), b = shadow.getOrDefault(k, new int[2]);
-            out.put(k, new HitRate(GaMath.div(a[0], a[1], 0), a[1],
-                    GaMath.div(b[0], b[1], 0), b[1]));
+            int mn = intVal(r.get("mainN")), mc = intVal(r.get("mainC"));
+            int sn = intVal(r.get("shadowN")), sc = intVal(r.get("shadowC"));
+            out.put(key, new HitRate(GaMath.div(mc, mn, 0), mn, GaMath.div(sc, sn, 0), sn));
         }
         return out;
     }
 
-    private boolean cooldownPassed(LocalDate asOf, LocalDate since) {
-        return !asOf.isBefore(since.plusDays(config.globalInt("pool_cooldown_days")));
+    /** asOf 往前第 n 个交易日（含 asOf）；行情日历不足时退化为自然日估算。 */
+    private LocalDate tradingDayBack(LocalDate asOf, int n) {
+        int flag = config.globalInt("adjust_flag");
+        List<LocalDate> dates = data.tradeDates(flag, asOf.minusDays(Math.max(60, n * 4L)), asOf);
+        return dates.size() >= n ? dates.get(dates.size() - n)
+                : asOf.minusDays(Math.round(n * 7L / 5.0));
     }
 
-    /** 防抖：同一股票 20 个交易日内最多自动淘汰一次、复活一次。 */
-    private boolean coolingOk(String key, String eventType, LocalDate asOf, LocalDate since, boolean restore) {
+    /** 冷却期按真实交易日计数（配置 pool_cooldown_days 的口径是交易日，不是自然日）。 */
+    private boolean cooldownPassed(LocalDate asOf, LocalDate since) {
+        return tradingDaysBetween(since, asOf) >= config.globalInt("pool_cooldown_days");
+    }
+
+    /** 防抖：同一股票 N 个交易日内最多自动淘汰一次、复活一次。 */
+    private boolean coolingOk(String key, String eventType, LocalDate asOf) {
         List<Map<String, Object>> last = store.lastPoolEvent(key.split("\\|")[0],
                 key.split("\\|").length > 1 ? key.split("\\|")[1] : "SZ", eventType);
         if (last.isEmpty()) return true;
         Object d = last.get(0).get("eventDate");
         if (d == null) return true;
         LocalDate prev = LocalDate.parse(String.valueOf(d).substring(0, 10));
-        return !prev.plusDays(config.globalInt("pool_cooldown_days")).isAfter(asOf);
+        return tradingDaysBetween(prev, asOf) >= config.globalInt("pool_cooldown_days");
+    }
+
+    private int tradingDaysBetween(LocalDate from, LocalDate to) {
+        if (!to.isAfter(from)) return 0;
+        return data.tradeDates(config.globalInt("adjust_flag"), from,
+                to.plusDays(Math.max(7, config.globalInt("pool_cooldown_days") * 3L))).stream()
+                .filter(d -> !d.isBefore(from) && !d.isAfter(to)).toList().size();
     }
 
     private record HitRate(double hit60, int n60, double hitShadow, int nShadow) {}
 
-    private static Metrics metrics(List<Bar> series, GaConfig cfg) {
+    private static Metrics metrics(List<Bar> series, GaConfig cfg, double volQuantile) {
         int w = Math.min(cfg.globalInt("pool_suspend_window"), series.size());
         int suspended = 0, missing = 0;
         double amount = 0;
@@ -234,7 +249,33 @@ public class PoolService {
             if (!Double.isFinite(b.close()) || b.volume() <= 0 || b.amount() <= 0) miss5++;
         }
         return new Metrics((double) suspended / Math.max(1, w), amount / Math.max(1, w),
-                (double) miss5 / Math.max(1, w5), 0.0);
+                (double) miss5 / Math.max(1, w5), volQuantile);
+    }
+
+    /**
+     * 每只股票近 20 个交易日收益率的样本标准差在全池的截面分位（0~1）。
+     * 与 FeatureService 的 vol_20 同源口径（pct_chg / 100），仅用于 EXTREME_VOL 规则。
+     */
+    private static Map<String, Double> volQuantiles(Map<String, List<Bar>> bars) {
+        List<Map.Entry<String, Double>> vols = new ArrayList<>();
+        for (Map.Entry<String, List<Bar>> e : bars.entrySet()) {
+            List<Bar> s = e.getValue();
+            int w = Math.min(20, s.size());
+            if (w < 2) continue;
+            double[] r = new double[w];
+            for (int i = 0; i < w; i++) {
+                Bar b = s.get(s.size() - w + i);
+                double pct = Double.isFinite(b.pctChg()) ? b.pctChg() / 100.0
+                        : (b.preclose() > 0 ? b.close() / b.preclose() - 1 : 0);
+                r[i] = Double.isFinite(pct) ? pct : 0;
+            }
+            vols.add(Map.entry(e.getKey(), GaMath.stdSample(r)));
+        }
+        vols.sort(Map.Entry.comparingByValue());
+        Map<String, Double> out = new HashMap<>();
+        int n = vols.size();
+        for (int i = 0; i < n; i++) out.put(vols.get(i).getKey(), n <= 1 ? 0.0 : (double) i / (n - 1));
+        return out;
     }
 
     private record Metrics(double suspendRatio, double amountMa20, double missingRatio, double volQuantile) {}

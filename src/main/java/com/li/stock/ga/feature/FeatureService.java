@@ -92,7 +92,10 @@ public class FeatureService {
             if (series.isEmpty() || prefixes.stream().noneMatch(series.get(0).code()::startsWith)) continue;
             for (Bar b : series) if (b.tradable()) byDate.computeIfAbsent(b.date(), d -> new ArrayList<>()).add(b);
         }
+        // byDate 的 key 顺序是「按 code 遍历时首次遇到某日期」的顺序，含次新股/停牌股时
+        // 并不保证升序；idx / MA / ret5 / regime 全依赖日期顺序，必须显式排序。
         List<LocalDate> dates = new ArrayList<>(byDate.keySet());
+        dates.sort(LocalDate::compareTo);
         double[] rets = new double[dates.size()];
         double[] idx = new double[dates.size()];
         double[] idxMa20 = new double[dates.size()];
@@ -146,6 +149,7 @@ public class FeatureService {
         int zWindow = config.globalInt("market_z_window");
         Map<LocalDate, MarketPoint> market = data.loadMarket(flag, warmStart(from), to);
         List<LocalDate> allDates = new ArrayList<>(market.keySet());
+        allDates.sort(LocalDate::compareTo); // 时序 z-score 依赖升序；不依赖 Map 的插入顺序
         double[] mktRet5 = new double[allDates.size()], mktVol20 = new double[allDates.size()],
                 breadth = new double[allDates.size()], regime = new double[allDates.size()];
         for (int i = 0; i < allDates.size(); i++) {
@@ -210,8 +214,12 @@ public class FeatureService {
         List<String> issues = new ArrayList<>();
         String price = data.checkPriceConsistency();
         if (!price.isEmpty()) issues.add(price);
-        int n = data.countFeatureDate(date, flag);
-        if (n == 0) issues.add(date + " 尚无特征数据，请先运行 FeatureJob");
+        // 以行情库最新交易日为基准：收盘前 / 非交易日 / 手动触发时「日历今天」本就没有行情，
+        // 用日历今天判断会每次都误报「尚无特征数据」。
+        LocalDate base = data.latestDate(flag);
+        LocalDate check = base == null ? date : base;
+        int n = data.countFeatureDate(check, flag);
+        if (n == 0) issues.add(check + " 尚无特征数据，请先运行 FeatureJob");
         return issues;
     }
 

@@ -1,5 +1,6 @@
 package com.li.stock.ga.job;
 
+import com.li.stock.ga.cleanup.GaCleanupService;
 import com.li.stock.ga.config.GaConfig;
 import com.li.stock.ga.engine.GaEngine;
 import com.li.stock.ga.feature.FeatureService;
@@ -52,7 +53,7 @@ public class GaJobRunner {
     /** 看板 jobs/status 列出的全部可执行任务，顺序即展示顺序。 */
     public static final List<String> JOB_NAMES = List.of(
             "InitJob", "FeatureJob", "PredictJob", "VerifyJob", "MetricJob", "PoolJob",
-            "EvolveJob", "CalibrateJob", "FactorIcJob", "ReplayJob",
+            "EvolveJob", "CalibrateJob", "FactorIcJob", "ReplayJob", "CleanupJob",
             "DailyPipeline", "WeeklyEvolve");
 
     private final GaConfig config;
@@ -64,6 +65,7 @@ public class GaJobRunner {
     private final PoolService pool;
     private final ChampionService champions;
     private final GaEngine engine;
+    private final GaCleanupService cleanup;
 
     private final ExecutorService executor = Executors.newSingleThreadExecutor(r -> {
         Thread t = new Thread(r, "stock-ga-jobs");
@@ -88,7 +90,8 @@ public class GaJobRunner {
 
     public GaJobRunner(GaConfig config, GaDataRepository data, GaStoreRepository store,
                        FeatureService features, PredictionService predictions, MetricService metrics,
-                       PoolService pool, ChampionService champions, GaEngine engine) {
+                       PoolService pool, ChampionService champions, GaEngine engine,
+                       GaCleanupService cleanup) {
         this.config = config;
         this.data = data;
         this.store = store;
@@ -98,6 +101,7 @@ public class GaJobRunner {
         this.pool = pool;
         this.champions = champions;
         this.engine = engine;
+        this.cleanup = cleanup;
     }
 
     // ------------------------------------------------------------------ 定时触发
@@ -120,6 +124,19 @@ public class GaJobRunner {
             return;
         }
         submitInternal("WeeklyEvolve", true);
+    }
+
+    /**
+     * 每周日 04:00 的数据清理。
+     *
+     * <p><b>只做只读体检</b>：把脏数据与超期数据规模写进任务日志/看板，不自动删除。
+     * 真正清理必须由用户在「数据清理」页预览后显式执行（cleanup_dry_run=0 + confirm），
+     * 避免无人值守时误删历史数据。此任务不受定时开关影响（只读、无副作用）。</p>
+     */
+    @Scheduled(cron = "${stock.ga.cron-cleanup:0 0 4 ? * SUN}", zone = "Asia/Shanghai")
+    public void scheduledCleanup() {
+        if (!enabled || config.globalInt("cleanup_enabled") == 0) return;
+        submitNamed("CleanupJob", () -> cleanup.scheduledInspect());
     }
 
     /**
@@ -292,6 +309,7 @@ public class GaJobRunner {
             case "CalibrateJob" -> calibrateAll();
             case "FactorIcJob" -> factorIcAll(today);
             case "ReplayJob" -> replayDefault(flag, today);
+            case "CleanupJob" -> cleanup.jobSummary();
             case "DailyPipeline" -> dailyPipeline(flag, today);
             case "WeeklyEvolve" -> weeklyEvolve(flag, today);
             default -> throw new IllegalArgumentException("未实现的任务：" + name);

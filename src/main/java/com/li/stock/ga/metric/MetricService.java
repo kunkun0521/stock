@@ -215,7 +215,10 @@ public class MetricService {
         int minSamples = config.globalInt("retire_min_samples");
         double threshold = config.globalDouble("retire_balacc");
         for (int h : config.horizons()) {
-            List<Map<String, Object>> rows = store.rolePredictions(h, "CHAMPION", 200000);
+            // retire_window 的口径是交易日：按交易日历换算成自然日区间并下推到 SQL，
+            // 旧实现把全历史（含 150 万行回放）当「近 60 日」，衰减判断完全失真。
+            LocalDate from = retireFrom(asOf, window);
+            List<Map<String, Object>> rows = store.rolePredictions(h, "CHAMPION", from, asOf, 200000);
             Map<String, Object> b = balacc(rows);
             int n = b.get("n") instanceof Number num ? num.intValue() : 0;
             double bal = b.get("bal") instanceof Number num ? num.doubleValue() : 0;
@@ -228,6 +231,13 @@ public class MetricService {
             }
         }
         return toReEvolve;
+    }
+
+    /** 把 N 个交易日换算成自然日起点：交易日 ≈ 7/5 自然日，再用真实交易日历校准。 */
+    private LocalDate retireFrom(LocalDate asOf, int tradingDays) {
+        LocalDate rough = asOf.minusDays(Math.max(30, Math.round(tradingDays * 7L / 5.0) + 20));
+        List<LocalDate> dates = data.tradeDates(config.globalInt("adjust_flag"), rough, asOf);
+        return dates.size() >= tradingDays ? dates.get(dates.size() - tradingDays) : rough;
     }
 
     private Map<String, Object> balacc(List<Map<String, Object>> rows) {

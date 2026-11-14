@@ -168,7 +168,12 @@ public class GaEngine {
             int active = 0;
             double s = 0;
             for (int j = 0; j < ind.m.length; j++) {
-                if (ind.m[j] == 1) { s += ind.w[j] * z[j]; active++; }
+                if (ind.m[j] == 1) {
+                    // 与 ChampionService.predictOne 保持同一套缺失值口径：非有限 z 按截面均值 0 处理
+                    double zj = j < z.length && Double.isFinite(z[j]) ? z[j] : 0.0;
+                    s += Double.isFinite(ind.w[j]) ? ind.w[j] * zj : 0;
+                    active++;
+                }
             }
             return ind.b + s / Math.sqrt(Math.max(1, active));
         }
@@ -505,24 +510,42 @@ public class GaEngine {
 
     /** 从库里的 chromosome_json 还原个体（热启动）。 */
     public static Individual parseIndividual(Map<String, Object> row, int n, int minActive) {
+        long id = row.get("individualId") instanceof Number num ? num.longValue() : 0;
         try {
             com.fasterxml.jackson.databind.ObjectMapper om = new com.fasterxml.jackson.databind.ObjectMapper();
-            com.fasterxml.jackson.databind.JsonNode node = om.readTree(String.valueOf(row.get("chromosomeJson")));
+            Object raw = row.get("chromosomeJson");
+            if (raw == null) throw new IllegalArgumentException("chromosome_json 为空");
+            com.fasterxml.jackson.databind.JsonNode node = (raw instanceof byte[] b)
+                    ? om.readTree(b) : om.readTree(String.valueOf(raw));
+            if (node == null || !node.hasNonNull("w") || !node.hasNonNull("m")
+                    || !node.hasNonNull("b") || !node.hasNonNull("delta")) {
+                throw new IllegalArgumentException("染色体字段缺失");
+            }
             double[] w = new double[n]; int[] m = new int[n];
             int i = 0;
             for (com.fasterxml.jackson.databind.JsonNode x : node.get("w")) if (i < n) w[i++] = x.asDouble();
             i = 0;
             for (com.fasterxml.jackson.databind.JsonNode x : node.get("m")) if (i < n) m[i++] = x.asInt();
             Individual ind = new Individual(w, m, node.get("b").asDouble(), node.get("delta").asDouble());
-            ind.id = row.get("individualId") instanceof Number num ? num.longValue() : 0;
+            ind.id = id;
+            // 还原适应度：Hold-out 评估用 F 做 softmax 权重，若不还原会退化成均匀权重，
+            // 与准入时按真实 F 加权的集成不是同一个模型。
+            ind.fitness = new Fitness(dbl(row.get("fitness")), dbl(row.get("fitTrain")),
+                    dbl(row.get("fitValid")), dbl(row.get("balaccValid")), dbl(row.get("icValid")),
+                    dbl(row.get("brierValid")), dbl(row.get("coverageValid")), dbl(row.get("stabilityValid")));
             ensureActive(m, new Random(ind.id + 1), minActive);
             return ind;
         } catch (Exception e) {
-            Random r = new Random(7);
+            // 固定种子 7 会让批量解析失败的热启动个体基因型完全相同、多样性崩塌；
+            // 改为按个体 id 派生，且异常时记录告警便于发现染色体版本不兼容。
+            System.err.println("[GA][WARN] 染色体解析失败 individualId=" + id + "：" + e.getMessage());
+            Random r = new Random(7L * 31 + id);
             double[] w = new double[n]; int[] m = new int[n];
             for (int j = 0; j < n; j++) { w[j] = r.nextGaussian(); m[j] = r.nextDouble() < 0.3 ? 1 : 0; }
             ensureActive(m, r, minActive);
             return new Individual(w, m, 0, 0.03);
         }
     }
+
+    private static double dbl(Object o) { return o instanceof Number num ? num.doubleValue() : 0; }
 }

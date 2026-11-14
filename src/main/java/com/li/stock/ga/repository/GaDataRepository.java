@@ -100,6 +100,26 @@ public class GaDataRepository {
         return out;
     }
 
+    /**
+     * 截至 to 的近 20 个交易日平均成交额（元）。
+     *
+     * <p>ga_prediction.amount_ma_20 的错误分析分桶阈值（2e7 / 5e7 / 1e8 / 3e8）
+     * 是按 20 日均额设计的；旧实现把「当日成交额」写进该列，导致分桶系统性错分。</p>
+     */
+    public Map<String, Double> amountMa20(int flag, LocalDate to) {
+        List<LocalDate> dates = tradeDates(flag, to.minusDays(60), to);
+        if (dates.isEmpty()) return Map.of();
+        LocalDate from = dates.get(Math.max(0, dates.size() - 20));
+        Map<String, Double> out = new HashMap<>();
+        jdbc.query("SELECT `code`,`market`,AVG(`amount`) a FROM `stock_daily_all` "
+                        + "WHERE `adjustflag`=? AND `trade_date` BETWEEN ? AND ? AND `amount`>0 "
+                        + "GROUP BY `code`,`market`",
+                (RowCallbackHandler) rs -> out.put(key(rs.getString("code"), rs.getString("market")),
+                        rs.getDouble("a")),
+                flag, Date.valueOf(from), Date.valueOf(to));
+        return out;
+    }
+
     /** 基准日 → 到期日 的收盘价（回填必须用实时重读的价格，不能用 base_close）。 */
     public Map<String, Double> closeMap(int flag, LocalDate from, LocalDate to) {
         Map<String, Double> out = new HashMap<>();
@@ -253,7 +273,12 @@ public class GaDataRepository {
                         + "ORDER BY `trade_date`,`code`",
                 (RowCallbackHandler) rs -> {
                     float[] v = new float[FeatureKeys.N];
-                    for (int j = 0; j < FeatureKeys.N; j++) v[j] = rs.getFloat(6 + j);
+                    for (int j = 0; j < FeatureKeys.N; j++) {
+                        float x = rs.getFloat(6 + j);
+                        // 写入时 NaN/Inf 被清洗成 SQL NULL；读回必须还原成 NaN，
+                        // 否则缺失值会被当成「真实取值为 0」的有效观测，污染截面 z-score。
+                        v[j] = rs.wasNull() ? Float.NaN : x;
+                    }
                     LocalDate d = localDate(rs.getDate("trade_date"));
                     out.computeIfAbsent(d, k -> new ArrayList<>()).add(new FeatureRow(
                             rs.getString("code"), rs.getString("market"), d, v,

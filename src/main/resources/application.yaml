@@ -65,6 +65,19 @@ stock:
 
   # 遗传算法涨跌预测（ga 包）：14 张 ga_ 表由 GaSchemaInitializer 幂等创建，
   # 参数全部来自 ga_config；关闭 enabled 只停定时触发，看板手动触发仍可用。
+  # 股票概率预测引擎（prob 包）：统计计算在 Python 项目 PythonProject/stock-probability-engine，
+  # 后端只做 REST + 任务调度。schedule-enabled 打开后每个交易日收盘自动跑 engine daily。
+  prob:
+    enabled: true
+    schedule-enabled: false
+    cron-daily: "0 30 18 * * MON-FRI"
+    python: py
+    python-args: "-3"
+    workdir: "D:/code/PythonProject/stock-probability-engine"
+    config-path: "D:/code/PythonProject/stock-probability-engine/config.yaml"
+    features-path: "D:/code/PythonProject/stock-probability-engine/features.yaml"
+    source-table: stock_daily
+
   ga:
     enabled: true
     cron-daily: "0 30 17 * * ?"
